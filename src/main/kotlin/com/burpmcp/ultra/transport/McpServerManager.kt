@@ -11,12 +11,19 @@ import io.ktor.server.cio.*
 import io.ktor.server.engine.*
 import io.ktor.server.plugins.cors.routing.*
 import io.ktor.server.sse.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
-import io.modelcontextprotocol.kotlin.sdk.server.mcp
+import io.modelcontextprotocol.kotlin.sdk.server.SseServerTransport
+import io.modelcontextprotocol.kotlin.sdk.shared.Transport
+import io.modelcontextprotocol.kotlin.sdk.shared.TransportSendOptions
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCMessage
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import kotlinx.coroutines.*
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Manages the lifecycle of MCP server instances and their underlying
@@ -50,6 +57,15 @@ class McpServerManager(
     private var sseServer: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private var httpServer: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    /**
+     * Hard cap on a single SSE write. The failure mode is a client that stops draining the
+     * stream (e.g. a long-running PostToolUse hook), wedging the per-session write forever
+     * (docs/BUG-sse-backpressure-hang.md) — NOT slowness — so this is generous: it must clear a
+     * normal large-result flush but still bound the hang. On expiry the session is torn down
+     * (its coroutine cancelled) and a standard SSE client reconnects.
+     */
+    private val sendTimeoutMs: Long = 45_000L
 
     /**
      * Creates a fresh MCP [Server] instance with all tools and resources
@@ -94,21 +110,17 @@ class McpServerManager(
     }
 
     /**
-     * Returns a factory function compatible with the MCP SDK's `mcp()` extension.
-     * The SDK expects `(ServerSSESession) -> Server`.
-     */
-    private fun serverFactory(): (ServerSSESession) -> Server = { _ -> createMcpServer() }
-
-    /**
      * Starts both transport servers asynchronously. Failures on one
      * transport do not prevent the other from starting.
      *
-     * Each server is hardened via [installLocalhostSecurity] (Host-header
-     * allowlist + locked CORS + per-session token) before mounting the MCP
-     * SSE transport via [mcp]. The [mcp] extension mounts the SSE stream at the
-     * ROOT path '/' (GET) with a POST back-channel keyed by a sessionId query
-     * param — NOT '/sse'. Both require the auth token (Authorization: Bearer,
-     * an mcp_token cookie, or a ?token= query param).
+     * Each server is hardened via [installLocalhostSecurity] (Host-header allowlist + locked
+     * CORS + per-session token), then mounts the MCP SSE transport with our OWN wiring —
+     * equivalent to the SDK's `mcp()` helper, but giving us a handle to each per-session
+     * [SseServerTransport] and the SSE GET coroutine's [Job], so [TimeoutSseTransport] can
+     * bound `send()` and recover a back-pressured client instead of wedging forever. The SSE
+     * stream is the ROOT path '/' (GET); the POST back-channel is keyed by a `sessionId` query
+     * param — NOT '/sse'. Both require the auth token (Authorization: Bearer, an mcp_token
+     * cookie, or a ?token= query param).
      */
     fun start() {
         startTransport("Primary SSE", ssePort) { sseServer = it }
@@ -135,7 +147,32 @@ class McpServerManager(
             try {
                 val server = embeddedServer(CIO, port = port, host = "127.0.0.1") {
                     installLocalhostSecurity(authToken, listOf(port))
-                    mcp(serverFactory())
+                    // Hand-rolled equivalent of the SDK's `mcp(serverFactory())` so we OWN each
+                    // per-session SseServerTransport AND the SSE GET coroutine's Job — the SDK's
+                    // mcp() builds the transport internally and hands us no handle. Route shape is
+                    // byte-identical: SSE GET at "/", POST back-channel at "/?sessionId=...".
+                    // The wrapped transport bounds send() (TimeoutSseTransport); the raw transport
+                    // is registered for the POST path. See docs/BUG-sse-backpressure-hang.md.
+                    install(SSE)
+                    val sessions = ConcurrentHashMap<String, SseServerTransport>()
+                    routing {
+                        sse {
+                            val raw = SseServerTransport("", this)
+                            val tx = TimeoutSseTransport(raw, coroutineContext.job, sendTimeoutMs, logging)
+                            val mcpServer = createMcpServer()
+                            sessions[raw.sessionId] = raw
+                            mcpServer.onClose { sessions.remove(raw.sessionId) }
+                            mcpServer.connect(tx)        // responses flow through the bounded send
+                            awaitCancellation()          // keep the SSE stream open until torn down
+                        }
+                        post {
+                            val sid = call.request.queryParameters["sessionId"]
+                                ?: return@post call.respond(HttpStatusCode.BadRequest, "sessionId query parameter is not provided")
+                            val raw = sessions[sid]
+                                ?: return@post call.respond(HttpStatusCode.NotFound, "Session not found")
+                            raw.handlePostMessage(call)  // routes onMessage -> server -> tx.send (bounded)
+                        }
+                    }
                 }
                 server.start(wait = false)
                 assign(server)
@@ -178,5 +215,35 @@ class McpServerManager(
         httpServer?.stop(gracePeriodMillis = 1000, timeoutMillis = 2000)
         scope.cancel()
         logging.logToOutput("BurpMCP-Ultra: MCP servers stopped")
+    }
+}
+
+/**
+ * Wraps an [SseServerTransport] and bounds its [send] with a hard timeout so a client that
+ * stops draining the SSE stream cannot wedge the per-session write forever (the 57-min hang —
+ * see docs/BUG-sse-backpressure-hang.md). On timeout we cancel the SSE GET coroutine's
+ * [sessionJob]: this is the ONLY recovery that works, because the session's `close()` and the
+ * SSE heartbeat both re-acquire the same per-session Mutex the wedged `send()` holds and would
+ * deadlock behind it. Cancelling the Job cancels the shared response byte-channel, which resumes
+ * the parked `flush()` with a cause, releasing the Mutex and unwinding the POST coroutine into a
+ * recoverable error. All members except [send] delegate unchanged to [delegate].
+ */
+private class TimeoutSseTransport(
+    private val delegate: SseServerTransport,
+    private val sessionJob: Job,
+    private val sendTimeoutMs: Long,
+    private val logging: Logging
+) : Transport by delegate {
+    override suspend fun send(message: JSONRPCMessage, options: TransportSendOptions?) {
+        try {
+            withTimeout(sendTimeoutMs) { delegate.send(message, options) }
+        } catch (t: TimeoutCancellationException) {
+            logging.logToError(
+                "BurpMCP-Ultra: an SSE write stalled >${sendTimeoutMs}ms (client stopped reading the " +
+                    "stream); tearing that session down to recover instead of wedging it — the client reconnects."
+            )
+            sessionJob.cancel(CancellationException("SSE send back-pressure timeout after ${sendTimeoutMs}ms"))
+            throw t
+        }
     }
 }
