@@ -55,6 +55,8 @@ dependencies {
     // Montoya API on the test classpath too (it's compileOnly for main) so unit tests can
     // construct domain types like McpActivityEntry whose optional field is a Montoya type.
     testImplementation("net.portswigger.burp.extensions:montoya-api:2026.2")
+    // Coroutine test utilities (runTest + virtual time) for the SSE send-timeout trigger test.
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

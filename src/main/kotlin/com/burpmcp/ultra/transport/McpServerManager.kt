@@ -235,15 +235,32 @@ private class TimeoutSseTransport(
     private val logging: Logging
 ) : Transport by delegate {
     override suspend fun send(message: JSONRPCMessage, options: TransportSendOptions?) {
-        try {
-            withTimeout(sendTimeoutMs) { delegate.send(message, options) }
-        } catch (t: TimeoutCancellationException) {
+        runWithSendTimeout(sendTimeoutMs, sessionJob, onTimeout = {
             logging.logToError(
                 "BurpMCP-Ultra: an SSE write stalled >${sendTimeoutMs}ms (client stopped reading the " +
                     "stream); tearing that session down to recover instead of wedging it — the client reconnects."
             )
-            sessionJob.cancel(CancellationException("SSE send back-pressure timeout after ${sendTimeoutMs}ms"))
-            throw t
-        }
+        }) { delegate.send(message, options) }
     }
+}
+
+/**
+ * Runs [block] under a [timeoutMs] deadline; on timeout invokes [onTimeout], cancels [sessionJob]
+ * (the SSE GET coroutine), and re-throws. Cancelling that job cancels the shared response
+ * byte-channel, which resumes the back-pressured flush() with a cause and releases the per-session
+ * Mutex — the only sound recovery (close()/heartbeat would deadlock on that same Mutex). Extracted
+ * from [TimeoutSseTransport.send] so the recovery TRIGGER is deterministically unit-testable
+ * without needing to induce a real TCP-level write wedge.
+ */
+internal suspend fun <T> runWithSendTimeout(
+    timeoutMs: Long,
+    sessionJob: Job,
+    onTimeout: () -> Unit,
+    block: suspend () -> T
+): T = try {
+    withTimeout(timeoutMs) { block() }
+} catch (t: TimeoutCancellationException) {
+    onTimeout()
+    sessionJob.cancel(CancellationException("SSE send back-pressure timeout after ${timeoutMs}ms"))
+    throw t
 }
