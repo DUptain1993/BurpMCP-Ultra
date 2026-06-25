@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.scanner.AuditResult
 import burp.api.montoya.scanner.ConsolidationAction
 import burp.api.montoya.scanner.ScanCheck
@@ -244,9 +245,8 @@ class ScanCheckBridge(
                         val httpService = baseRequestResponse.httpService() ?: continue
 
                         // Send the request
-                        val checkResponse = try {
-                            api.http().sendRequest(modifiedRequest.withService(httpService))
-                        } catch (_: Exception) {
+                        val checkResponse = BoundedHttp.send(api, modifiedRequest.withService(httpService))
+                        if (checkResponse == null) {
                             allStepsPassed = false
                             if (stopIfNoMatch) break else continue
                         }

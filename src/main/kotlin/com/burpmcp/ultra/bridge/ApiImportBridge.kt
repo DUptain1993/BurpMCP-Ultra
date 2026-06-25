@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
@@ -178,12 +179,14 @@ class ApiImportBridge(
                             // Operator scope policy (mcp_scope_mode=enforce): don't send out-of-scope.
                             skippedOutOfScope++
                         } else try {
-                            val result = api.http().sendRequest(httpRequest)
-                            if (addToSitemap) {
-                                api.siteMap().add(result)
-                                addedToSitemap++
+                            val result = BoundedHttp.send(api, httpRequest)
+                            if (result != null) {
+                                if (addToSitemap) {
+                                    api.siteMap().add(result)
+                                    addedToSitemap++
+                                }
+                                requestsSent++
                             }
-                            requestsSent++
                         } catch (_: Exception) {}
                     } else if (addToSitemap) {
                         try {

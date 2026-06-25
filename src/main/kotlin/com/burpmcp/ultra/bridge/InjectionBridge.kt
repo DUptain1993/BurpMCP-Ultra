@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.requests.HttpRequest
 import com.burpmcp.ultra.injection.InjectionOracle
@@ -27,9 +28,9 @@ class InjectionBridge(private val api: MontoyaApi) {
 
     private fun send(service: HttpService, raw: String): Probe = try {
         val start = System.nanoTime()
-        val result = api.http().sendRequest(HttpRequest.httpRequest(service, raw))
+        val result = BoundedHttp.send(api, HttpRequest.httpRequest(service, raw))
         val ms = (System.nanoTime() - start) / 1_000_000
-        val resp = result.response()
+        val resp = result?.response()
         Probe(resp?.bodyToString() ?: "", resp?.statusCode()?.toInt() ?: 0, ms)
     } catch (_: Exception) {
         Probe("", 0, 0)

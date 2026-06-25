@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.message.requests.HttpRequest
 import com.burpmcp.ultra.graphql.GraphQl
 import com.burpmcp.ultra.safety.ScopeGate
@@ -67,7 +68,7 @@ class GraphQlBridge(private val api: MontoyaApi) {
                 .withMethod("POST")
                 .withAddedHeader("Content-Type", "application/json")
                 .withBody(body)
-            api.http().sendRequest(req).response()?.bodyToString() ?: ""
+            BoundedHttp.send(api, req)?.response()?.bodyToString() ?: ""
         } catch (_: Exception) { "" }
     }
 

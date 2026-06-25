@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.message.requests.HttpRequest
 import com.burpmcp.ultra.recon.JsEndpoints
 import com.burpmcp.ultra.recon.ReconHeuristics
@@ -28,7 +29,7 @@ class ReconBridge(private val api: MontoyaApi) {
 
     /** GET [url], returning (status, bodyLength); (0,0) on failure. */
     private fun sendGet(url: String): Pair<Int, Int> = try {
-        val resp = api.http().sendRequest(HttpRequest.httpRequestFromUrl(url)).response()
+        val resp = BoundedHttp.send(api, HttpRequest.httpRequestFromUrl(url))?.response()
         Pair(resp?.statusCode()?.toInt() ?: 0, resp?.body()?.length() ?: 0)
     } catch (_: Exception) {
         Pair(0, 0)
@@ -109,7 +110,7 @@ class ReconBridge(private val api: MontoyaApi) {
             for (cand in tested) {
                 val testUrl = "$url$sep$cand=$MARKER"
                 val body = try {
-                    api.http().sendRequest(HttpRequest.httpRequestFromUrl(testUrl)).response()?.bodyToString() ?: ""
+                    BoundedHttp.send(api, HttpRequest.httpRequestFromUrl(testUrl))?.response()?.bodyToString() ?: ""
                 } catch (_: Exception) { "" }
                 if (ReconHeuristics.reflects(body, MARKER)) {
                     reflected.add(buildJsonObject { put("param", cand); put("reflected", true); put("url", testUrl) })

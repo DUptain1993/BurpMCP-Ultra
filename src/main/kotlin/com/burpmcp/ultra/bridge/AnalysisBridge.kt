@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.http.HttpService
@@ -516,10 +517,10 @@ class AnalysisBridge(private val api: MontoyaApi) {
                     }
 
                     val startTime = System.nanoTime()
-                    val result = api.http().sendRequest(httpRequest)
+                    val result = BoundedHttp.send(api, httpRequest)
                     val elapsed = (System.nanoTime() - startTime) / 1_000_000
 
-                    val resp = result.response()
+                    val resp = result?.response()
                     results.add(AuthResult(
                         levelName = levelName,
                         statusCode = resp?.statusCode()?.toInt() ?: 0,

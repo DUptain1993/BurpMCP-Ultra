@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.scanner.AuditConfiguration
 import burp.api.montoya.scanner.AuditResult
 import burp.api.montoya.scanner.BuiltInAuditConfiguration
@@ -723,9 +724,8 @@ class ScannerBridge(
                             val httpService = baseRequestResponse.httpService()
                                 ?: continue
 
-                            val checkRequestResponse = api.http().sendRequest(
-                                modifiedRequest.withService(httpService)
-                            )
+                            val checkRequestResponse = BoundedHttp.send(api, modifiedRequest.withService(httpService))
+                                ?: continue   // timeout/error -> skip this payload
 
                             val respBody = checkRequestResponse.response()?.bodyToString() ?: ""
 

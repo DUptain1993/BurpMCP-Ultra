@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.http.message.requests.HttpRequest
 import com.burpmcp.ultra.safety.ScopeGate
 import com.burpmcp.ultra.webprobe.CorsAnalysis
@@ -26,7 +27,7 @@ class WebProbeBridge(private val api: MontoyaApi) {
             val tests = buildJsonArray {
                 for (origin in origins) {
                     val resp = try {
-                        api.http().sendRequest(HttpRequest.httpRequestFromUrl(url).withAddedHeader("Origin", origin)).response()
+                        BoundedHttp.send(api, HttpRequest.httpRequestFromUrl(url).withAddedHeader("Origin", origin))?.response()
                     } catch (_: Exception) { null }
                     val acao = resp?.headerValue("Access-Control-Allow-Origin")
                     val acac = resp?.headerValue("Access-Control-Allow-Credentials")
@@ -60,7 +61,7 @@ class WebProbeBridge(private val api: MontoyaApi) {
         val check = scopeGate.check(url)
         check.deny?.let { return it }
         return try {
-            val resp = api.http().sendRequest(HttpRequest.httpRequestFromUrl(url)).response()
+            val resp = BoundedHttp.send(api, HttpRequest.httpRequestFromUrl(url))?.response()
                 ?: return buildJsonObject { put("error", "No response from $url") }
             val headers = resp.headers().groupBy({ it.name().lowercase() }, { it.value() }).mapValues { it.value.joinToString("; ") }
             val body = try { resp.bodyToString() } catch (_: Exception) { "" }
