@@ -358,6 +358,24 @@ class StateManager {
         return entry
     }
 
+    /** Capacity of the retained MCP activity buffer (for callers restoring it on startup). */
+    val activityCapacity: Int get() = maxMcpActivityEntries
+
+    /**
+     * Seeds the activity buffer from persisted [entries] (expected newest-first) WITHOUT
+     * notifying persistence listeners — used on extension startup to restore the dashboard
+     * across reloads/restarts. Continues the id sequence past the restored ids to avoid
+     * collisions with subsequent live entries.
+     */
+    fun restoreMcpActivity(entries: List<McpActivityEntry>) {
+        for (e in entries) {
+            if (mcpActivity.size >= maxMcpActivityEntries) break
+            mcpActivity.addLast(e)
+        }
+        val maxId = entries.maxOfOrNull { it.id } ?: 0L
+        if (maxId > mcpActivityIdCounter.get()) mcpActivityIdCounter.set(maxId)
+    }
+
     private val idCounter = AtomicLong(0)
 
     /**

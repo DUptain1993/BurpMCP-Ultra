@@ -2,6 +2,7 @@ package com.burpmcp.ultra.core
 
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.transport.ActivityStore
 import com.burpmcp.ultra.transport.McpServerManager
 import com.burpmcp.ultra.transport.DashboardServer
 import com.burpmcp.ultra.transport.SecurityConfig
@@ -27,6 +28,22 @@ class BurpMcpUltraExtension : BurpExtension {
 
         // Initialize centralized state manager
         stateManager = StateManager()
+
+        // Restore the dashboard MCP activity from the durable store so it survives extension
+        // reloads / Burp restarts / crashes (the in-memory deque + EventBus are otherwise lost
+        // on every reload, wiping the dashboard). Repopulates the Swing tab (via the deque) AND
+        // the web dashboard (by re-seeding the EventBus ring buffer with the historical events).
+        try {
+            val projectName = try { api.project().name() } catch (_: Exception) { "" }
+            val restored = ActivityStore.load(projectName, stateManager.activityCapacity)
+            stateManager.restoreMcpActivity(restored)
+            restored.asReversed().forEach { e -> eventBus.emit("tool.called", ActivityStore.toEventData(e)) }
+            ActivityStore.compact(ActivityStore.MAX_LINES)
+            stateManager.mcpActivityListeners.add { entry -> ActivityStore.append(entry, projectName) }
+            api.logging().logToOutput("BurpMCP-Ultra: restored ${restored.size} dashboard activity entries (project: ${projectName.ifEmpty { "default" }})")
+        } catch (e: Exception) {
+            api.logging().logToError("BurpMCP-Ultra: activity restore failed: ${e.message}")
+        }
 
         // Auth token shared by all three local servers. Required on every request
         // (header or ?token=) to defeat the "malicious website drives your localhost

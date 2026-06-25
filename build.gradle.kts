@@ -52,6 +52,9 @@ dependencies {
 
     // Testing — JUnit 5 via kotlin-test
     testImplementation(kotlin("test-junit5"))
+    // Montoya API on the test classpath too (it's compileOnly for main) so unit tests can
+    // construct domain types like McpActivityEntry whose optional field is a Montoya type.
+    testImplementation("net.portswigger.burp.extensions:montoya-api:2026.2")
     testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
