@@ -82,6 +82,10 @@ class BurpMcpUltraTab(
         tabbedPane.addTab("Server", buildServerTab())
         mainPanel.add(tabbedPane, BorderLayout.CENTER)
 
+        // Render persisted MCP activity (the deque is seeded on startup by the dashboard
+        // persistence), rebuild the id->entry lookup, and seed the counters BEFORE wiring the
+        // live listener so new calls increment on top without double-counting.
+        initActivityFromRestore()
         wireActivityListener()
 
         refreshTimer = Timer(1500) {
@@ -249,6 +253,23 @@ class BurpMcpUltraTab(
         }
     }
 
+    /**
+     * Restores the MCP Activity view from the entries the StateManager loaded on startup
+     * (dashboard persistence): renders the rows, rebuilds the id->entry lookup so restored rows
+     * are clickable, and seeds the Calls/Errors/per-tool counters. Called once, before
+     * [wireActivityListener], so subsequent live calls increment on top without double-counting.
+     */
+    private fun initActivityFromRestore() {
+        val restored = stateManager.mcpActivity.toList()
+        if (restored.isNotEmpty()) {
+            totalToolCalls.set(restored.size.toLong())
+            totalErrors.set(restored.count { it.isError }.toLong())
+            restored.forEach { perToolCounts.computeIfAbsent(it.toolName) { AtomicLong(0) }.incrementAndGet() }
+        }
+        applyActivityFilter()
+        updateActivityStats()
+    }
+
     private fun passesActivityFilter(e: McpActivityEntry): Boolean {
         when (activityFilter) {
             "http" -> if (e.toolName !in httpToolNames) return false
@@ -261,6 +282,7 @@ class BurpMcpUltraTab(
     }
 
     private fun addActivityRow(e: McpActivityEntry, at: Int) {
+        activityById[e.id] = e   // every rendered row (incl. persisted/restored ones) must be clickable
         val time = try { LocalDateTime.ofInstant(Instant.parse(e.timestamp), ZoneId.systemDefault()).format(TIME_FORMAT) } catch (_: Exception) { e.timestamp.takeLast(12) }
         activityTableModel.insertRow(at, arrayOf<Any?>(e.id, time, e.toolName, e.method.ifEmpty { "-" }, e.url.ifEmpty { e.argsSummary.take(120) }, e.host, if (e.statusCode > 0) e.statusCode else null as Int?, e.durationMs.toInt()))
     }
