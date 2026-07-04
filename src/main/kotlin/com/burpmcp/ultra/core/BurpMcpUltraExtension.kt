@@ -3,6 +3,8 @@ package com.burpmcp.ultra.core
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
 import com.burpmcp.ultra.transport.ActivityStore
+import com.burpmcp.ultra.transport.AuditLog
+import com.burpmcp.ultra.transport.BindHostPolicy
 import com.burpmcp.ultra.transport.McpServerManager
 import com.burpmcp.ultra.transport.DashboardServer
 import com.burpmcp.ultra.transport.SecurityConfig
@@ -54,6 +56,20 @@ class BurpMcpUltraExtension : BurpExtension {
         val authToken = prefs.getString("mcp_auth_token")
             ?: SecurityConfig.generateToken().also { prefs.setString("mcp_auth_token", it) }
 
+        // Configurable bind host (GitHub issue #4). The requested host comes from a JVM system
+        // property (ops override), else a persisted Burp preference, else loopback. It is then
+        // passed through the SECURITY GATE: a non-loopback bind exposes 149 Burp-driving tools to
+        // the network, so it is only honored when the operator has explicitly opted in
+        // (mcp_allow_remote_bind / -Dburpmcp.allowRemoteBind). Otherwise it is refused and
+        // downgraded back to loopback. See BindHostPolicy.
+        val requestedHost = System.getProperty("burpmcp.bindHost")?.trim()?.ifEmpty { null }
+            ?: prefs.getString("mcp_bind_host")?.trim()?.ifEmpty { null }
+            ?: "127.0.0.1"
+        val allowRemoteBind = System.getProperty("burpmcp.allowRemoteBind")?.toBooleanStrictOrNull()
+            ?: (try { prefs.getBoolean("mcp_allow_remote_bind") } catch (_: Exception) { null } ?: false)
+        val bindDecision = BindHostPolicy.resolve(requestedHost, allowRemoteBind)
+        val bindHost = bindDecision.effectiveHost
+
         // Create all bridge instances via factory
         val bridges = BridgeFactory.createAll(api, eventBus, stateManager)
 
@@ -63,20 +79,21 @@ class BurpMcpUltraExtension : BurpExtension {
             eventBus = eventBus,
             stateManager = stateManager,
             authToken = authToken,
+            bindHost = bindHost,
             ssePort = 9876,
             httpPort = 9877,
             logging = api.logging()
         )
         serverManager.start()
 
-        dashboardServer = DashboardServer(bridges, eventBus, stateManager, authToken, 9878, api.logging())
+        dashboardServer = DashboardServer(bridges, eventBus, stateManager, authToken, bindHost, 9878, api.logging())
         dashboardServer.start()
 
         // Register Burp Suite event handlers for proxy, scanner, scope, websocket, and HTTP traffic
         registerBurpHandlers(bridges)
 
         // Initialize and register the UI tab
-        uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken)
+        uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken, bindHost)
         api.userInterface().registerSuiteTab("BurpMCP-Ultra", uiTab.getComponent())
 
         // Register unload handler for clean shutdown
@@ -94,11 +111,31 @@ class BurpMcpUltraExtension : BurpExtension {
         // output log, so one channel covers both surfaces.
         val (toolCount, resourceCount) = serverManager.registeredCounts()
         uiTab.log("INFO", "System", "BurpMCP-Ultra v${BuildInfo.VERSION} started")
-        uiTab.log("INFO", "System", "MCP SSE (primary):   http://127.0.0.1:9876/  (root path '/', bearer token required)")
-        uiTab.log("INFO", "System", "MCP SSE (secondary): http://127.0.0.1:9877/")
-        uiTab.log("INFO", "System", "Dashboard:                 http://127.0.0.1:9878")
+        uiTab.log("INFO", "System", "MCP SSE (primary):   http://$bindHost:9876/  (root path '/', bearer token required)")
+        uiTab.log("INFO", "System", "MCP SSE (secondary): http://$bindHost:9877/")
+        uiTab.log("INFO", "System", "Dashboard:                 http://$bindHost:9878")
         uiTab.log("INFO", "System", "Tools: $toolCount  |  MCP Resources: $resourceCount")
-        api.logging().raiseInfoEvent("BurpMCP-Ultra v${BuildInfo.VERSION} started (SSE 9876/9877, dashboard 9878)")
+        api.logging().raiseInfoEvent("BurpMCP-Ultra v${BuildInfo.VERSION} started on $bindHost (SSE 9876/9877, dashboard 9878)")
+
+        // Surface the bind-host gate decision. A refused (downgraded) request and — especially —
+        // an honored network exposure are security-relevant, so warn loudly and leave a durable
+        // audit-log entry an operator can reconstruct later.
+        if (bindDecision.downgraded) {
+            val msg = bindDecision.message ?: "requested bind host was refused; using loopback"
+            api.logging().logToError("BurpMCP-Ultra: $msg")
+            uiTab.log("WARN", "System", msg)
+        }
+        if (bindDecision.exposed) {
+            val msg = "SECURITY: ${bindDecision.message}"
+            api.logging().logToError("BurpMCP-Ultra: $msg")
+            uiTab.log("WARN", "System", msg)
+            AuditLog.record(
+                toolName = "server.remote_bind",
+                timestampIso = java.time.Instant.now().toString(),
+                durationMs = 0, isError = false, args = null,
+                url = "", host = bindHost, method = "", statusCode = 0
+            )
+        }
 
         // Do NOT log the auth token. uiTab.log() also writes to Burp's shared output
         // log, so logging the token would leak it into saved project files / screenshots.

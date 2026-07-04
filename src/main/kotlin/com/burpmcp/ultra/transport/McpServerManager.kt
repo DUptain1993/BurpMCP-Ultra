@@ -41,6 +41,9 @@ import java.util.concurrent.ConcurrentHashMap
  * @param bridges All bridge instances for tool/resource registration.
  * @param eventBus Shared event bus for event-related tools/resources.
  * @param stateManager Shared state for stateful tools.
+ * @param bindHost Interface address to bind the transport servers to. Defaults to loopback; a
+ *   non-loopback value only ever reaches here after [BindHostPolicy] confirmed the operator
+ *   opted into network exposure (GitHub issue #4).
  * @param ssePort TCP port for the primary SSE transport (default 9876).
  * @param httpPort TCP port for the secondary SSE transport (default 9877).
  * @param logging Burp Suite logging API for startup/error messages.
@@ -50,6 +53,7 @@ class McpServerManager(
     private val eventBus: EventBus,
     private val stateManager: StateManager,
     private val authToken: String,
+    private val bindHost: String = "127.0.0.1",
     private val ssePort: Int = 9876,
     private val httpPort: Int = 9877,
     private val logging: Logging
@@ -145,8 +149,8 @@ class McpServerManager(
     ) {
         scope.launch {
             try {
-                val server = embeddedServer(CIO, port = port, host = "127.0.0.1") {
-                    installLocalhostSecurity(authToken, listOf(port))
+                val server = embeddedServer(CIO, port = port, host = bindHost) {
+                    installLocalhostSecurity(authToken, listOf(port), allowedSecurityHosts())
                     // Hand-rolled equivalent of the SDK's `mcp(serverFactory())` so we OWN each
                     // per-session SseServerTransport AND the SSE GET coroutine's Job — the SDK's
                     // mcp() builds the transport internally and hands us no handle. Route shape is
@@ -178,32 +182,47 @@ class McpServerManager(
                 assign(server)
 
                 if (verifyListening(port)) {
-                    logging.logToOutput("BurpMCP-Ultra: $label transport listening on http://127.0.0.1:$port (MCP SSE endpoint is the root path '/', not '/sse')")
+                    logging.logToOutput("BurpMCP-Ultra: $label transport listening on http://$bindHost:$port (MCP SSE endpoint is the root path '/', not '/sse')")
                 } else {
                     logging.logToError(
-                        "BurpMCP-Ultra: $label transport reported start() but port $port is NOT listening. " +
+                        "BurpMCP-Ultra: $label transport reported start() but $bindHost:$port is NOT listening. " +
                             "This is the GitHub issue #2/#3 symptom — almost always a JAR built with Java 22+ " +
                             "(Kotlin/Ktor/MCP-SDK incompatibility). Rebuild with a JDK 17-21 (NOT Burp's bundled Java 25)."
                     )
                 }
             } catch (e: Exception) {
-                logging.logToError("BurpMCP-Ultra: Failed to start $label transport on port $port: ${e.message}")
+                logging.logToError("BurpMCP-Ultra: Failed to start $label transport on $bindHost:$port: ${e.message}")
                 logging.logToError("BurpMCP-Ultra: Stack trace: ${e.stackTraceToString()}")
             }
         }
     }
 
-    /** Probes 127.0.0.1:[port] for up to ~3s to confirm the engine actually bound the socket. */
+    /**
+     * Probes the bound socket for up to ~3s to confirm the engine actually bound. A wildcard
+     * bind (`0.0.0.0`/`::`) isn't connectable at that address, so [BindHostPolicy.probeHost]
+     * redirects the probe to loopback — otherwise this false-negatives and logs a misleading error.
+     */
     private suspend fun verifyListening(port: Int): Boolean {
+        val probe = BindHostPolicy.probeHost(bindHost)
         repeat(15) {
             try {
-                java.net.Socket().use { it.connect(java.net.InetSocketAddress("127.0.0.1", port), 200) }
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(probe, port), 200) }
                 return true
             } catch (_: Exception) {
                 kotlinx.coroutines.delay(200)
             }
         }
         return false
+    }
+
+    /**
+     * Hosts accepted by the Host-header + CORS allowlist. Always loopback; when bound to a
+     * network interface (operator opted in) this machine's own addresses are added so real LAN
+     * clients — whose `Host` header is the concrete IP, not the wildcard — pass the check.
+     */
+    private fun allowedSecurityHosts(): List<String> {
+        val extra = if (BindHostPolicy.classify(bindHost) != BindHostPolicy.Kind.LOOPBACK) NetworkHosts.local() else emptyList()
+        return (listOf(bindHost, "127.0.0.1", "localhost") + extra).distinct()
     }
 
     /**

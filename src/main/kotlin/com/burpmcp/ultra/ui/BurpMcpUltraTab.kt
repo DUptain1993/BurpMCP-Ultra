@@ -11,6 +11,7 @@ import com.burpmcp.ultra.core.ConnectionInfo
 import com.burpmcp.ultra.events.EventBus
 import com.burpmcp.ultra.state.McpActivityEntry
 import com.burpmcp.ultra.state.StateManager
+import com.burpmcp.ultra.transport.BindHostPolicy
 import com.burpmcp.ultra.transport.McpServerManager
 import kotlinx.serialization.json.*
 import java.awt.*
@@ -47,7 +48,8 @@ class BurpMcpUltraTab(
     private val eventBus: EventBus,
     private val stateManager: StateManager,
     private val bridges: BridgeFactory.Bridges,
-    private val authToken: String
+    private val authToken: String,
+    private val bindHost: String
 ) {
     companion object {
         const val MAX_TABLE_ROWS = 2000
@@ -865,46 +867,108 @@ class BurpMcpUltraTab(
         content.add(JLabel("Connection Information").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        addRow(1, "MCP SSE (root /):", JLabel(ConnectionInfo.primarySseUrl))
-        addRow(2, "SSE (secondary):", JLabel(ConnectionInfo.secondarySseUrl))
-        addRow(3, "Dashboard:", JLabel(ConnectionInfo.dashboardUrl))
+        addRow(1, "MCP SSE (root /):", JLabel(ConnectionInfo.primarySseUrlForHost(bindHost)))
+        addRow(2, "SSE (secondary):", JLabel(ConnectionInfo.secondarySseUrlForHost(bindHost)))
+        addRow(3, "Dashboard:", JLabel(ConnectionInfo.dashboardUrlForHost(bindHost)))
 
         gbc.gridy = 4; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
 
-        // MCP config
+        // Server bind address (GitHub issue #4). The embedded servers are started before this UI
+        // is built, so a change here takes effect on extension reload. A non-loopback address is
+        // security-gated: the operator must confirm the network exposure, which also enables the
+        // mcp_allow_remote_bind opt-in the startup gate (BindHostPolicy) requires.
         gbc.gridy = 5; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(JLabel("Server Bind Address").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
+        gbc.gridwidth = 1
+
+        gbc.gridy = 6; gbc.gridx = 0; gbc.weightx = 0.0
+        content.add(JLabel("Bind host:").apply { font = font.deriveFont(Font.BOLD) }, gbc)
+        val bindHostField = JTextField(bindHost, 18)
+        bindHostField.font = Font("Monospaced", Font.PLAIN, 12)
+        gbc.gridx = 1; gbc.weightx = 1.0
+        content.add(bindHostField, gbc)
+
+        val allowRemoteCheck = JCheckBox("Allow remote (non-loopback) bind — exposes tools to your network")
+        allowRemoteCheck.isSelected =
+            try { api.persistence().preferences().getBoolean("mcp_allow_remote_bind") ?: false } catch (_: Exception) { false }
+        gbc.gridy = 7; gbc.gridx = 0; gbc.gridwidth = 2; gbc.weightx = 1.0
+        content.add(allowRemoteCheck, gbc); gbc.gridwidth = 1
+
+        val saveBindHostBtn = JButton("Save Bind Address")
+        saveBindHostBtn.addActionListener {
+            val effective = bindHostField.text.trim().ifEmpty { "127.0.0.1" }
+            when (BindHostPolicy.classify(effective)) {
+                BindHostPolicy.Kind.INVALID -> {
+                    JOptionPane.showMessageDialog(
+                        panel,
+                        "\"$effective\" is not a valid IP address or hostname.",
+                        "Invalid Bind Address", JOptionPane.ERROR_MESSAGE
+                    )
+                    return@addActionListener
+                }
+                BindHostPolicy.Kind.LOOPBACK -> { /* safe default — no confirmation needed */ }
+                else -> {
+                    val ok = JOptionPane.showConfirmDialog(
+                        panel,
+                        "Binding to \"$effective\" makes BurpMCP-Ultra's tools, the dashboard, and your\n" +
+                            "captured proxy history (requests, cookies, tokens) reachable from your network.\n" +
+                            "Only the bearer token would protect them.\n\nEnable this network exposure?",
+                        "Confirm network exposure", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
+                    )
+                    if (ok != JOptionPane.YES_OPTION) return@addActionListener
+                    allowRemoteCheck.isSelected = true  // confirming exposure enables the startup gate
+                }
+            }
+            val allowRemote = allowRemoteCheck.isSelected
+            api.persistence().preferences().setString("mcp_bind_host", effective)
+            api.persistence().preferences().setBoolean("mcp_allow_remote_bind", allowRemote)
+            JOptionPane.showMessageDialog(
+                panel,
+                "Bind address saved as $effective (remote bind ${if (allowRemote) "ENABLED" else "disabled"}).\n" +
+                    "Reload the BurpMCP-Ultra extension for it to take effect.",
+                "BurpMCP-Ultra", JOptionPane.INFORMATION_MESSAGE
+            )
+        }
+        gbc.gridy = 8; gbc.gridx = 1; gbc.weightx = 0.0
+        content.add(saveBindHostBtn, gbc)
+
+        gbc.gridy = 9; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(JSeparator(), gbc); gbc.gridwidth = 1
+
+        // MCP config
+        gbc.gridy = 10; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JLabel("MCP Client Config").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        val configArea = JTextArea(ConnectionInfo.clientConfigJson(authToken))
+        val configArea = JTextArea(ConnectionInfo.clientConfigJson(authToken, host = bindHost))
         configArea.isEditable = false; configArea.font = Font("Monospaced", Font.PLAIN, 11)
         configArea.lineWrap = true; configArea.wrapStyleWord = false; configArea.rows = 3
-        gbc.gridy = 6; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 11; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(configArea, gbc)
         val copyConfigBtn = JButton("Copy Config")
         copyConfigBtn.addActionListener { copyToClipboard(configArea.text) }
-        gbc.gridy = 7; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
+        gbc.gridy = 12; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
         content.add(copyConfigBtn, gbc)
         gbc.gridwidth = 1
 
-        gbc.gridy = 8; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 13; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
 
         // Live stats
-        gbc.gridy = 9; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 14; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JLabel("Live Statistics").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        serverUptimeLabel = JLabel("00:00:00"); addRow(10, "Uptime:", serverUptimeLabel)
-        serverToolCallsLabel = JLabel("0"); addRow(11, "Total MCP Tool Calls:", serverToolCallsLabel)
-        serverEventsLabel = JLabel("0"); addRow(12, "Event Buffer:", serverEventsLabel)
-        serverWsLabel = JLabel("0"); addRow(13, "WebSocket Connections:", serverWsLabel)
-        serverCollabLabel = JLabel("0"); addRow(14, "Collaborator Clients:", serverCollabLabel)
-        serverScanLabel = JLabel("0"); addRow(15, "Active Scan Tasks:", serverScanLabel)
+        serverUptimeLabel = JLabel("00:00:00"); addRow(15, "Uptime:", serverUptimeLabel)
+        serverToolCallsLabel = JLabel("0"); addRow(16, "Total MCP Tool Calls:", serverToolCallsLabel)
+        serverEventsLabel = JLabel("0"); addRow(17, "Event Buffer:", serverEventsLabel)
+        serverWsLabel = JLabel("0"); addRow(18, "WebSocket Connections:", serverWsLabel)
+        serverCollabLabel = JLabel("0"); addRow(19, "Collaborator Clients:", serverCollabLabel)
+        serverScanLabel = JLabel("0"); addRow(20, "Active Scan Tasks:", serverScanLabel)
 
         // Filler
-        gbc.gridy = 16; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
+        gbc.gridy = 21; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
         content.add(JLabel(), gbc)
 
         panel.add(JScrollPane(content), BorderLayout.CENTER)

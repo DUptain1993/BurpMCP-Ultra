@@ -34,13 +34,27 @@ object SecurityConfig {
         SecureRandom().nextBytes(bytes)
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
     }
+
+    /**
+     * Builds the (Host-header allowlist, CORS-origin allowlist) for every ([hosts] x [ports])
+     * pair. Pure — the anti-DNS-rebinding invariant is that only these explicit hosts are ever
+     * permitted, never `anyHost()`.
+     */
+    fun buildAllowlists(hosts: List<String>, ports: List<Int>): Pair<Set<String>, Set<String>> {
+        val h = hosts.distinct()
+        val allowedHosts = ports.flatMap { port -> h.map { host -> "$host:$port" } }.toSet()
+        val allowedOrigins = ports.flatMap { port -> h.map { host -> "http://$host:$port" } }.toSet()
+        return allowedHosts to allowedOrigins
+    }
 }
 
 /**
  * Installs Host validation + locked CORS + token auth on this [Application].
  *
  * @param token the per-session secret required on every request.
- * @param ports loopback ports that define the valid Host / Origin allowlist.
+ * @param ports ports that, combined with [hosts], define the valid Host / Origin allowlist.
+ * @param hosts the allowed bind hosts. Defaults to loopback; a non-loopback value is only ever
+ *   passed after [BindHostPolicy] has confirmed the operator opted into network exposure.
  * @param tokenExemptPaths paths served WITHOUT a token (still Host/Origin-checked).
  *   Used only for the dashboard's `/` page, which injects the token into the
  *   served HTML so its own same-origin API calls can authenticate. A cross-origin
@@ -50,12 +64,10 @@ object SecurityConfig {
 fun Application.installLocalhostSecurity(
     token: String,
     ports: List<Int>,
+    hosts: List<String> = listOf("127.0.0.1", "localhost"),
     tokenExemptPaths: Set<String> = emptySet()
 ) {
-    val allowedHosts = ports.flatMap { listOf("127.0.0.1:$it", "localhost:$it") }.toSet()
-    val allowedOrigins = ports.flatMap {
-        listOf("http://127.0.0.1:$it", "http://localhost:$it")
-    }.toSet()
+    val (allowedHosts, allowedOrigins) = SecurityConfig.buildAllowlists(hosts, ports)
 
     install(CORS) {
         allowMethod(HttpMethod.Options)
@@ -65,11 +77,8 @@ fun Application.installLocalhostSecurity(
         allowHeader(HttpHeaders.Authorization)
         allowHeader(HttpHeaders.ContentType)
         allowNonSimpleContentTypes = true
-        // Only loopback origins are ever permitted — never anyHost().
-        ports.forEach { p ->
-            allowHost("127.0.0.1:$p", schemes = listOf("http"))
-            allowHost("localhost:$p", schemes = listOf("http"))
-        }
+        // Only the explicitly configured host:port origins are ever permitted — never anyHost().
+        allowedHosts.forEach { hostPort -> allowHost(hostPort, schemes = listOf("http")) }
     }
 
     intercept(ApplicationCallPipeline.ApplicationPhase.Plugins) {
