@@ -42,4 +42,38 @@ class ActivityStoreTest {
         assertNull(ActivityStore.parseEntry("not json {"))
         assertNull(ActivityStore.parseEntry(""))
     }
+
+    // --- issue #8: clear/flush the saved store (multi-project safe) ---
+
+    @Test fun `rebuildLines deletes a project keeping others`() {
+        val parsed = listOf(entry(1) to "A", entry(2) to "B", entry(3) to "A")
+        val back = ActivityStore.rebuildLines(parsed, "A", emptyList()).mapNotNull { ActivityStore.parseEntry(it) }
+        assertEquals(listOf(2L), back.map { it.first.id }, "only project B should remain")
+        assertTrue(back.all { it.second == "B" })
+    }
+
+    @Test fun `rebuildLines replaces a project's entries and keeps others`() {
+        val parsed = listOf(entry(1) to "A", entry(2) to "B")
+        val back = ActivityStore.rebuildLines(parsed, "A", listOf(entry(9), entry(10))).mapNotNull { ActivityStore.parseEntry(it) }
+        assertEquals(listOf(2L, 9L, 10L), back.map { it.first.id }, "B kept, A replaced with 9,10")
+        assertEquals("A", back.first { it.first.id == 9L }.second)
+    }
+
+    @Test fun `rebuildLines yields empty when the only project is deleted`() {
+        val parsed = listOf(entry(1) to "A", entry(2) to "A")
+        assertEquals(emptyList(), ActivityStore.rebuildLines(parsed, "A", emptyList()))
+    }
+
+    @Test fun `append no-ops when persistence is disabled`() {
+        val prev = ActivityStore.enabled
+        try {
+            ActivityStore.enabled = false
+            val before = if (java.io.File(ActivityStore.path()).exists()) java.io.File(ActivityStore.path()).length() else 0L
+            ActivityStore.append(entry(999), "DisabledProj")
+            val after = if (java.io.File(ActivityStore.path()).exists()) java.io.File(ActivityStore.path()).length() else 0L
+            assertEquals(before, after, "no bytes should be written while persistence is disabled")
+        } finally {
+            ActivityStore.enabled = prev
+        }
+    }
 }

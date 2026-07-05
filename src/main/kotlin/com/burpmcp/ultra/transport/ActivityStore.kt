@@ -32,6 +32,14 @@ object ActivityStore {
     var lastError: String? = null
         private set
 
+    /**
+     * Whether new entries are written to disk. Operator-controlled (Burp pref
+     * `mcp_persist_activity`, default true) via the Server/Activity tab toggle. When false,
+     * [append] no-ops so MCP activity is session-only (pre-2.2.0 behaviour). See issue #8.
+     */
+    @Volatile
+    var enabled: Boolean = true
+
     fun path(): String = file.absolutePath
 
     /** Serializes one activity entry to a JSONL record (pure; no I/O). */
@@ -92,14 +100,54 @@ object ActivityStore {
         put("status_code", e.statusCode)
     }
 
-    /** Appends one entry to the durable store. Failures are recorded in [lastError], not thrown. */
+    /** Appends one entry to the durable store. No-ops when [enabled] is false (session-only mode). */
     fun append(e: McpActivityEntry, project: String) {
+        if (!enabled) return
         try {
             file.appendText(buildEntry(e, project) + "\n")
         } catch (ex: Exception) {
             lastError = ex.message
         }
     }
+
+    /**
+     * Pure: rebuild the file's lines, dropping every entry tagged [project] and re-adding
+     * [replacementForProject] (given oldest-first) for that project. A delete is
+     * `replacementForProject = emptyList()`; a flush passes the current in-memory entries. Other
+     * projects' lines are preserved (the store is multi-project). Returns oldest-first file order.
+     */
+    fun rebuildLines(
+        parsed: List<Pair<McpActivityEntry, String>>,
+        project: String,
+        replacementForProject: List<McpActivityEntry>
+    ): List<String> {
+        val others = parsed.filter { it.second != project }.map { buildEntry(it.first, it.second) }
+        val mine = replacementForProject.map { buildEntry(it, project) }
+        return others + mine
+    }
+
+    /** Reads the store, drops+replaces the [project]'s entries, and rewrites (deletes file if empty). */
+    private fun rewriteProject(project: String, replacement: List<McpActivityEntry>) {
+        try {
+            val existing = if (file.exists()) file.readLines().mapNotNull { parseEntry(it) } else emptyList()
+            val lines = rebuildLines(existing, project, replacement)
+            if (lines.isEmpty()) { if (file.exists()) file.delete() }
+            else file.writeText(lines.joinToString("\n") + "\n")
+        } catch (ex: Exception) {
+            lastError = ex.message
+        }
+    }
+
+    /** Permanently deletes [project]'s saved history from disk (keeps other projects). Issue #8. */
+    fun deleteForProject(project: String) = rewriteProject(project, emptyList())
+
+    /**
+     * Snapshots the current in-memory [entries] (newest-first, as the live deque) to disk for
+     * [project], replacing any prior saved entries for it. Used by "flush on enable" so turning
+     * persistence on saves what you already have — not just future calls.
+     */
+    fun flushProject(entries: List<McpActivityEntry>, project: String) =
+        rewriteProject(project, entries.asReversed())
 
     /** Loads up to [max] most-recent entries for [project], newest-first. Empty on any error. */
     fun load(project: String, max: Int): List<McpActivityEntry> = try {

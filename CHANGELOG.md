@@ -4,6 +4,20 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
+## [2.2.2] — 2026-07-06
+
+### Added
+- MCP Activity: a **"Delete Saved History"** action that truly clears the durable log — the
+  in-memory deque, this project's rows in the on-disk JSONL, and the dashboard event buffer — and a
+  **"Persist activity"** toggle (`mcp_persist_activity`, default ON) with an always-visible
+  `Saved: ON/OFF` status (issue #8). Enabling persistence flushes current in-memory activity to disk,
+  not just future calls.
+
+### Fixed
+- The MCP Activity **"Clear"** button (now **"Clear View"**, cosmetic) no longer appears broken: it
+  previously only emptied the table, so records reappeared on a filter change and after a Burp
+  restart because the table re-renders from the deque and the saved file was never touched (issue #8).
+
 ## [2.2.1] — 2026-07-05
 
 ### Added

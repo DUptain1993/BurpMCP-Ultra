@@ -12,6 +12,7 @@ import com.burpmcp.ultra.core.RebindOutcome
 import com.burpmcp.ultra.events.EventBus
 import com.burpmcp.ultra.state.McpActivityEntry
 import com.burpmcp.ultra.state.StateManager
+import com.burpmcp.ultra.transport.ActivityStore
 import com.burpmcp.ultra.transport.BindHostPolicy
 import com.burpmcp.ultra.transport.McpServerManager
 import kotlinx.serialization.json.*
@@ -188,9 +189,57 @@ class BurpMcpUltraTab(
             override fun keyReleased(e: java.awt.event.KeyEvent?) { activitySearch = searchField.text.trim().lowercase(); applyActivityFilter() }
         })
         filterBar.add(searchField)
-        val clearBtn = JButton("Clear"); clearBtn.font = clearBtn.font.deriveFont(11f); clearBtn.margin = Insets(2, 8, 2, 8)
-        clearBtn.addActionListener { activityTableModel.rowCount = 0; activityById.clear(); totalToolCalls.set(0); totalErrors.set(0); perToolCounts.clear() }
+        // "Clear View" — cosmetic only: empties the visible table, keeps memory + saved history
+        // (repopulates on a filter change). Distinct from "Delete Saved History" below. Issue #8.
+        fun clearViewOnly() {
+            activityTableModel.rowCount = 0; activityById.clear()
+            totalToolCalls.set(0); totalErrors.set(0); perToolCounts.clear(); updateActivityStats()
+        }
+        val clearBtn = JButton("Clear View"); clearBtn.font = clearBtn.font.deriveFont(11f); clearBtn.margin = Insets(2, 8, 2, 8)
+        clearBtn.toolTipText = "Clear the visible table only — keeps in-memory activity and any saved history"
+        clearBtn.addActionListener { clearViewOnly() }
         filterBar.add(clearBtn)
+
+        // "Delete Saved History" — the real, durable clear: wipes the in-memory deque, this
+        // project's rows in the on-disk store, and the dashboard event buffer. Confirmed. Issue #8.
+        val deleteSavedBtn = JButton("Delete Saved History"); deleteSavedBtn.font = deleteSavedBtn.font.deriveFont(11f); deleteSavedBtn.margin = Insets(2, 8, 2, 8)
+        deleteSavedBtn.toolTipText = "Permanently delete this project's MCP activity from memory AND disk"
+        deleteSavedBtn.addActionListener {
+            val n = stateManager.mcpActivity.size
+            val ok = JOptionPane.showConfirmDialog(
+                mainPanel,
+                "Permanently delete $n MCP activity record(s) for this project — including the saved\n" +
+                    "history on disk (${ActivityStore.path()})?\n\nThis cannot be undone.",
+                "Delete Saved History", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
+            )
+            if (ok != JOptionPane.YES_OPTION) return@addActionListener
+            stateManager.clearMcpActivity()
+            ActivityStore.deleteForProject(currentProject())
+            eventBus.clear()
+            clearViewOnly()
+        }
+        filterBar.add(deleteSavedBtn)
+
+        // Persistence toggle + always-visible status so neither default silently surprises anyone.
+        val persistStatus = JLabel()
+        fun refreshPersistStatus() {
+            persistStatus.text = if (ActivityStore.enabled) "  Saved: ON → disk" else "  Saved: OFF (session only)"
+            persistStatus.foreground = if (ActivityStore.enabled) Color(0x3F, 0xB9, 0x50) else Color(0x8B, 0x94, 0x9E)
+            persistStatus.toolTipText = if (ActivityStore.enabled) ActivityStore.path() else "MCP activity is not saved to disk"
+        }
+        val persistCheck = JCheckBox("Persist", ActivityStore.enabled); persistCheck.font = persistCheck.font.deriveFont(11f)
+        persistCheck.toolTipText = "Save MCP activity to disk so it survives Burp restarts. Off = this session only."
+        persistCheck.addActionListener {
+            ActivityStore.enabled = persistCheck.isSelected
+            api.persistence().preferences().setBoolean("mcp_persist_activity", persistCheck.isSelected)
+            // Flush on enable: save what's already in memory, not just future calls.
+            if (persistCheck.isSelected) ActivityStore.flushProject(stateManager.mcpActivity.toList(), currentProject())
+            refreshPersistStatus()
+        }
+        filterBar.add(Box.createHorizontalStrut(10))
+        filterBar.add(persistCheck)
+        filterBar.add(persistStatus)
+        refreshPersistStatus()
 
         val topBar = JPanel(BorderLayout()); topBar.add(activityStatsLabel, BorderLayout.NORTH); topBar.add(filterBar, BorderLayout.SOUTH)
 
@@ -298,6 +347,9 @@ class BurpMcpUltraTab(
             if (activityTableModel.rowCount >= MAX_TABLE_ROWS) break
         }
     }
+
+    /** Current Burp project name — the key ActivityStore tags/persists entries under. */
+    private fun currentProject(): String = try { api.project().name() } catch (_: Exception) { "" }
 
     private fun updateActivityStats() {
         val top = perToolCounts.entries.sortedByDescending { it.value.get() }.take(3).joinToString("  ") { "${it.key}(${it.value.get()})" }

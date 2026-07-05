@@ -318,6 +318,11 @@ class StateManager {
     /** Maximum number of MCP activity entries retained. */
     private val maxMcpActivityEntries = 2000
 
+    /** Clears all in-memory MCP activity (Activity-tab "Delete Saved History"). Issue #8. */
+    fun clearMcpActivity() {
+        mcpActivity.clear()
+    }
+
     /**
      * Records a new MCP tool call activity entry and notifies listeners.
      */

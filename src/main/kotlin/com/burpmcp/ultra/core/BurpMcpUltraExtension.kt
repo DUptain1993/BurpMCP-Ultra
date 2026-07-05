@@ -52,12 +52,21 @@ class BurpMcpUltraExtension : BurpExtension {
         // the web dashboard (by re-seeding the EventBus ring buffer with the historical events).
         try {
             val projectName = try { api.project().name() } catch (_: Exception) { "" }
-            val restored = ActivityStore.load(projectName, stateManager.activityCapacity)
-            stateManager.restoreMcpActivity(restored)
-            restored.asReversed().forEach { e -> eventBus.emit("tool.called", ActivityStore.toEventData(e)) }
-            ActivityStore.compact(ActivityStore.MAX_LINES)
+            // Persistence is operator-controlled (pref mcp_persist_activity, default ON — issue #8).
+            // When OFF, don't restore the saved history and don't write new entries (session-only).
+            ActivityStore.enabled =
+                try { api.persistence().preferences().getBoolean("mcp_persist_activity") } catch (_: Exception) { null } ?: true
+            if (ActivityStore.enabled) {
+                val restored = ActivityStore.load(projectName, stateManager.activityCapacity)
+                stateManager.restoreMcpActivity(restored)
+                restored.asReversed().forEach { e -> eventBus.emit("tool.called", ActivityStore.toEventData(e)) }
+                ActivityStore.compact(ActivityStore.MAX_LINES)
+                api.logging().logToOutput("BurpMCP-Ultra: restored ${restored.size} dashboard activity entries (project: ${projectName.ifEmpty { "default" }}); persistence ON → ${ActivityStore.path()}")
+            } else {
+                api.logging().logToOutput("BurpMCP-Ultra: MCP activity persistence is OFF (session only) — toggle it on the Server tab")
+            }
+            // Listener is always registered; ActivityStore.append() no-ops while persistence is OFF.
             stateManager.mcpActivityListeners.add { entry -> ActivityStore.append(entry, projectName) }
-            api.logging().logToOutput("BurpMCP-Ultra: restored ${restored.size} dashboard activity entries (project: ${projectName.ifEmpty { "default" }})")
         } catch (e: Exception) {
             api.logging().logToError("BurpMCP-Ultra: activity restore failed: ${e.message}")
         }
