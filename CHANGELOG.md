@@ -4,6 +4,14 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
+## [2.2.1] — 2026-07-05
+
+### Added
+- `http_send_request` now returns an advisory **`warnings`** array when the method, URL, or a header
+  value contains a raw CR/LF — the cause of Burp **"kettled"** HTTP/2 requests (issue #7). This lets
+  an agent notice a stray newline (often emitted by the LLM) and self-correct. Advisory only — it
+  never blocks, since sending CRLF on purpose (request-smuggling research) is a valid use.
+
 ## [2.2.0] — 2026-07-05 — Reliability, persistence & networking
 
 Theme: reliability & persistence, plus the community-requested configurable bind host.
