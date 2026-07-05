@@ -31,6 +31,21 @@ class BurpMcpUltraExtension : BurpExtension {
         // Initialize centralized state manager
         stateManager = StateManager()
 
+        // Register the unload handler EARLY — before anything binds a socket — with existence
+        // guards, so that even if a later init step throws, Burp can still stop whatever started
+        // and release the ports on the next reload. Without this, a partial init (e.g. a UI
+        // exception after the servers started) orphans the listeners and the next load fails with
+        // "Address already in use". Each step is guarded independently so one failure can't block
+        // the rest of the teardown.
+        api.extension().registerUnloadingHandler {
+            try { if (::uiTab.isInitialized) uiTab.dispose() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: uiTab dispose failed: ${e.message}") }
+            try { if (::dashboardServer.isInitialized) dashboardServer.stop() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: dashboard stop failed: ${e.message}") }
+            try { if (::serverManager.isInitialized) serverManager.stop() } catch (e: Exception) { api.logging().logToError("BurpMCP-Ultra: server stop failed: ${e.message}") }
+            try { eventBus.clear() } catch (_: Exception) {}
+            try { stateManager.cleanup() } catch (_: Exception) {}
+            api.logging().logToOutput("BurpMCP-Ultra: Extension unloaded")
+        }
+
         // Restore the dashboard MCP activity from the durable store so it survives extension
         // reloads / Burp restarts / crashes (the in-memory deque + EventBus are otherwise lost
         // on every reload, wiping the dashboard). Repopulates the Swing tab (via the deque) AND
@@ -73,7 +88,10 @@ class BurpMcpUltraExtension : BurpExtension {
         // Create all bridge instances via factory
         val bridges = BridgeFactory.createAll(api, eventBus, stateManager)
 
-        // Initialize and start MCP server on configured ports
+        // Initialize the MCP + dashboard servers. From here on a socket may be bound, so if ANY
+        // later init step throws we must stop them (see the early unload handler above) — otherwise
+        // the partially-initialized instance orphans its listeners and the next reload fails with
+        // "Address already in use".
         serverManager = McpServerManager(
             bridges = bridges,
             eventBus = eventBus,
@@ -84,26 +102,25 @@ class BurpMcpUltraExtension : BurpExtension {
             httpPort = 9877,
             logging = api.logging()
         )
-        serverManager.start()
-
         dashboardServer = DashboardServer(bridges, eventBus, stateManager, authToken, bindHost, 9878, api.logging())
-        dashboardServer.start()
+        try {
+            serverManager.start()
+            dashboardServer.start()
 
-        // Register Burp Suite event handlers for proxy, scanner, scope, websocket, and HTTP traffic
-        registerBurpHandlers(bridges)
+            // Register Burp Suite event handlers for proxy, scanner, scope, websocket, and HTTP traffic
+            registerBurpHandlers(bridges)
 
-        // Initialize and register the UI tab
-        uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken, bindHost)
-        api.userInterface().registerSuiteTab("BurpMCP-Ultra", uiTab.getComponent())
-
-        // Register unload handler for clean shutdown
-        api.extension().registerUnloadingHandler {
-            uiTab.dispose()
-            dashboardServer.stop()
-            serverManager.stop()
-            eventBus.clear()
-            stateManager.cleanup()
-            api.logging().logToOutput("BurpMCP-Ultra: Extension unloaded")
+            // Initialize and register the UI tab
+            uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken, bindHost, ::rebindServers)
+            api.userInterface().registerSuiteTab("BurpMCP-Ultra", uiTab.getComponent())
+        } catch (t: Throwable) {
+            api.logging().logToError(
+                "BurpMCP-Ultra: initialization failed after the servers started — stopping them so " +
+                    "the ports are released (avoids orphaned listeners): ${t.message}"
+            )
+            try { dashboardServer.stop() } catch (_: Exception) {}
+            try { serverManager.stop() } catch (_: Exception) {}
+            throw t
         }
 
         // Single startup banner with REAL counts (no more 137/134/121 drift, no
@@ -122,12 +139,14 @@ class BurpMcpUltraExtension : BurpExtension {
         // audit-log entry an operator can reconstruct later.
         if (bindDecision.downgraded) {
             val msg = bindDecision.message ?: "requested bind host was refused; using loopback"
-            api.logging().logToError("BurpMCP-Ultra: $msg")
+            // A warning about a deliberate/edge choice, not a failure — Output tab, not Errors.
+            api.logging().logToOutput("BurpMCP-Ultra: ⚠ $msg")
             uiTab.log("WARN", "System", msg)
         }
         if (bindDecision.exposed) {
             val msg = "SECURITY: ${bindDecision.message}"
-            api.logging().logToError("BurpMCP-Ultra: $msg")
+            // Loud, but it's an operator-chosen exposure warning — Output tab, not Errors.
+            api.logging().logToOutput("BurpMCP-Ultra: ⚠ $msg")
             uiTab.log("WARN", "System", msg)
             AuditLog.record(
                 toolName = "server.remote_bind",
@@ -142,6 +161,40 @@ class BurpMcpUltraExtension : BurpExtension {
         // The token and a ready-to-paste MCP client config are shown ONLY in the
         // BurpMCP-Ultra -> Server tab (same-process Swing UI), never in the log stream.
         uiTab.log("INFO", "System", "Auth token + MCP client config are shown in the BurpMCP-Ultra -> Server tab (kept out of the log).")
+    }
+
+    /**
+     * Live (no-reload) rebind of all three servers to [requestedHost], triggered by the Server-tab
+     * "Save & Rebind Now" button. Runs the same [BindHostPolicy] gate as startup, restarts the
+     * transports, and — on a network exposure — warns loudly and writes a durable audit entry,
+     * exactly as the startup path does. Called OFF the Swing EDT by the UI.
+     */
+    private fun rebindServers(requestedHost: String, allowRemoteBind: Boolean): RebindOutcome {
+        val d = BindHostPolicy.resolve(requestedHost, allowRemoteBind)
+        val boundOk = try {
+            val ok = serverManager.rebind(d.effectiveHost)
+            dashboardServer.rebind(d.effectiveHost)
+            ok
+        } catch (e: Exception) {
+            api.logging().logToError("BurpMCP-Ultra: live rebind to ${d.effectiveHost} failed: ${e.message}")
+            false
+        }
+        if (d.downgraded) {
+            api.logging().logToOutput("BurpMCP-Ultra: ⚠ ${d.message}")
+        }
+        if (d.exposed) {
+            api.logging().logToOutput("BurpMCP-Ultra: ⚠ SECURITY: ${d.message}")
+            AuditLog.record(
+                toolName = "server.remote_bind",
+                timestampIso = java.time.Instant.now().toString(),
+                durationMs = 0, isError = false, args = null,
+                url = "", host = d.effectiveHost, method = "", statusCode = 0
+            )
+        }
+        api.logging().logToOutput(
+            "BurpMCP-Ultra: live rebind to ${d.effectiveHost} — ${if (boundOk) "listening" else "NOT listening (check for a bind error)"}"
+        )
+        return RebindOutcome(d.effectiveHost, d.exposed, d.downgraded, boundOk, d.message)
     }
 
     private fun registerBurpHandlers(bridges: BridgeFactory.Bridges) {

@@ -53,14 +53,14 @@ class McpServerManager(
     private val eventBus: EventBus,
     private val stateManager: StateManager,
     private val authToken: String,
-    private val bindHost: String = "127.0.0.1",
+    private var bindHost: String = "127.0.0.1",
     private val ssePort: Int = 9876,
     private val httpPort: Int = 9877,
     private val logging: Logging
 ) {
     private var sseServer: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
     private var httpServer: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /**
      * Hard cap on a single SSE write. The failure mode is a client that stops draining the
@@ -234,6 +234,38 @@ class McpServerManager(
         httpServer?.stop(gracePeriodMillis = 1000, timeoutMillis = 2000)
         scope.cancel()
         logging.logToOutput("BurpMCP-Ultra: MCP servers stopped")
+    }
+
+    /**
+     * Hot-rebinds both SSE transports to [newHost] WITHOUT an extension reload: a bound socket
+     * cannot change address, so the listeners are stopped and reopened on the new interface. Runs
+     * on the caller's thread (blocks up to a few seconds while sockets stop + rebind) — the UI
+     * calls this OFF the EDT. [newHost] is the already-gated effective host (see [BindHostPolicy]).
+     * Returns whether the primary port came back up. Any live MCP client is disconnected by this,
+     * exactly as a reload would.
+     */
+    fun rebind(newHost: String): Boolean {
+        sseServer?.stop(gracePeriodMillis = 500, timeoutMillis = 1500); sseServer = null
+        httpServer?.stop(gracePeriodMillis = 500, timeoutMillis = 1500); httpServer = null
+        scope.cancel()
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        bindHost = newHost
+        start()
+        return blockingWaitListening(ssePort)
+    }
+
+    /** Blocking sibling of [verifyListening] for the rebind path (already off the EDT). */
+    private fun blockingWaitListening(port: Int): Boolean {
+        val probe = BindHostPolicy.probeHost(bindHost)
+        repeat(15) {
+            try {
+                java.net.Socket().use { it.connect(java.net.InetSocketAddress(probe, port), 200) }
+                return true
+            } catch (_: Exception) {
+                Thread.sleep(200)
+            }
+        }
+        return false
     }
 }
 

@@ -8,6 +8,7 @@ import burp.api.montoya.ui.editor.HttpRequestEditor
 import burp.api.montoya.ui.editor.HttpResponseEditor
 import com.burpmcp.ultra.bridge.BridgeFactory
 import com.burpmcp.ultra.core.ConnectionInfo
+import com.burpmcp.ultra.core.RebindOutcome
 import com.burpmcp.ultra.events.EventBus
 import com.burpmcp.ultra.state.McpActivityEntry
 import com.burpmcp.ultra.state.StateManager
@@ -49,7 +50,8 @@ class BurpMcpUltraTab(
     private val stateManager: StateManager,
     private val bridges: BridgeFactory.Bridges,
     private val authToken: String,
-    private val bindHost: String
+    private val bindHost: String,
+    private val rebindNow: (String, Boolean) -> RebindOutcome
 ) {
     companion object {
         const val MAX_TABLE_ROWS = 2000
@@ -850,6 +852,12 @@ class BurpMcpUltraTab(
     private lateinit var serverCollabLabel: JLabel
     private lateinit var serverScanLabel: JLabel
 
+    // Live-refreshable connection surfaces (updated on a hot rebind, no reload needed).
+    private lateinit var serverPrimaryUrlLabel: JLabel
+    private lateinit var serverSecondaryUrlLabel: JLabel
+    private lateinit var serverDashboardUrlLabel: JLabel
+    private lateinit var serverConfigArea: JTextArea
+
     private fun buildServerTab(): JPanel {
         val panel = JPanel(BorderLayout(0, 0))
         panel.border = EmptyBorder(12, 12, 12, 12)
@@ -867,9 +875,9 @@ class BurpMcpUltraTab(
         content.add(JLabel("Connection Information").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        addRow(1, "MCP SSE (root /):", JLabel(ConnectionInfo.primarySseUrlForHost(bindHost)))
-        addRow(2, "SSE (secondary):", JLabel(ConnectionInfo.secondarySseUrlForHost(bindHost)))
-        addRow(3, "Dashboard:", JLabel(ConnectionInfo.dashboardUrlForHost(bindHost)))
+        serverPrimaryUrlLabel = JLabel(ConnectionInfo.primarySseUrlForHost(bindHost)); addRow(1, "MCP SSE (root /):", serverPrimaryUrlLabel)
+        serverSecondaryUrlLabel = JLabel(ConnectionInfo.secondarySseUrlForHost(bindHost)); addRow(2, "SSE (secondary):", serverSecondaryUrlLabel)
+        serverDashboardUrlLabel = JLabel(ConnectionInfo.dashboardUrlForHost(bindHost)); addRow(3, "Dashboard:", serverDashboardUrlLabel)
 
         gbc.gridy = 4; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
@@ -895,7 +903,7 @@ class BurpMcpUltraTab(
         gbc.gridy = 7; gbc.gridx = 0; gbc.gridwidth = 2; gbc.weightx = 1.0
         content.add(allowRemoteCheck, gbc); gbc.gridwidth = 1
 
-        val saveBindHostBtn = JButton("Save Bind Address")
+        val saveBindHostBtn = JButton("Save & Rebind Now")
         saveBindHostBtn.addActionListener {
             val effective = bindHostField.text.trim().ifEmpty { "127.0.0.1" }
             when (BindHostPolicy.classify(effective)) {
@@ -913,22 +921,46 @@ class BurpMcpUltraTab(
                         panel,
                         "Binding to \"$effective\" makes BurpMCP-Ultra's tools, the dashboard, and your\n" +
                             "captured proxy history (requests, cookies, tokens) reachable from your network.\n" +
-                            "Only the bearer token would protect them.\n\nEnable this network exposure?",
+                            "Only the bearer token would protect them.\n\nRebind now and expose to the network?",
                         "Confirm network exposure", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE
                     )
                     if (ok != JOptionPane.YES_OPTION) return@addActionListener
-                    allowRemoteCheck.isSelected = true  // confirming exposure enables the startup gate
+                    allowRemoteCheck.isSelected = true  // confirming exposure enables the gate
                 }
             }
             val allowRemote = allowRemoteCheck.isSelected
             api.persistence().preferences().setString("mcp_bind_host", effective)
             api.persistence().preferences().setBoolean("mcp_allow_remote_bind", allowRemote)
-            JOptionPane.showMessageDialog(
-                panel,
-                "Bind address saved as $effective (remote bind ${if (allowRemote) "ENABLED" else "disabled"}).\n" +
-                    "Reload the BurpMCP-Ultra extension for it to take effect.",
-                "BurpMCP-Ultra", JOptionPane.INFORMATION_MESSAGE
-            )
+
+            // Rebind the live sockets off the EDT (stop+restart blocks a few seconds); any active
+            // MCP client is disconnected by this, exactly as a reload would be.
+            saveBindHostBtn.isEnabled = false
+            val prevText = saveBindHostBtn.text
+            saveBindHostBtn.text = "Rebinding…"
+            Thread {
+                val outcome = try { rebindNow(effective, allowRemote) }
+                    catch (e: Exception) { RebindOutcome(effective, false, false, false, e.message) }
+                SwingUtilities.invokeLater {
+                    saveBindHostBtn.isEnabled = true
+                    saveBindHostBtn.text = prevText
+                    serverPrimaryUrlLabel.text = ConnectionInfo.primarySseUrlForHost(outcome.effectiveHost)
+                    serverSecondaryUrlLabel.text = ConnectionInfo.secondarySseUrlForHost(outcome.effectiveHost)
+                    serverDashboardUrlLabel.text = ConnectionInfo.dashboardUrlForHost(outcome.effectiveHost)
+                    serverConfigArea.text = ConnectionInfo.clientConfigJson(authToken, host = outcome.effectiveHost)
+                    val msg = buildString {
+                        append(
+                            if (outcome.boundOk) "Rebound live to ${outcome.effectiveHost} — no reload needed."
+                            else "Rebind attempted on ${outcome.effectiveHost} but it did NOT come up — check Extensions → Output."
+                        )
+                        if (outcome.downgraded) append("\n\n${outcome.message}")
+                        if (outcome.exposed) append("\n\nSECURITY: now reachable from your network — only the bearer token protects it.")
+                    }
+                    JOptionPane.showMessageDialog(
+                        panel, msg, "BurpMCP-Ultra",
+                        if (outcome.boundOk && !outcome.exposed) JOptionPane.INFORMATION_MESSAGE else JOptionPane.WARNING_MESSAGE
+                    )
+                }
+            }.apply { isDaemon = true; name = "burpmcp-rebind" }.start()
         }
         gbc.gridy = 8; gbc.gridx = 1; gbc.weightx = 0.0
         content.add(saveBindHostBtn, gbc)
@@ -941,7 +973,8 @@ class BurpMcpUltraTab(
         content.add(JLabel("MCP Client Config").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        val configArea = JTextArea(ConnectionInfo.clientConfigJson(authToken, host = bindHost))
+        serverConfigArea = JTextArea(ConnectionInfo.clientConfigJson(authToken, host = bindHost))
+        val configArea = serverConfigArea
         configArea.isEditable = false; configArea.font = Font("Monospaced", Font.PLAIN, 11)
         configArea.lineWrap = true; configArea.wrapStyleWord = false; configArea.rows = 3
         gbc.gridy = 11; gbc.gridx = 0; gbc.gridwidth = 2

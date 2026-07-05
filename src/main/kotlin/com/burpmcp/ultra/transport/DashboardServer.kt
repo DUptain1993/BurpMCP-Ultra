@@ -23,12 +23,12 @@ class DashboardServer(
     private val eventBus: EventBus,
     private val stateManager: StateManager,
     private val authToken: String,
-    private val bindHost: String = "127.0.0.1",
+    private var bindHost: String = "127.0.0.1",
     private val port: Int = 9878,
     private val logging: Logging
 ) {
     private var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>? = null
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val startTime = Instant.now()
 
     fun start() {
@@ -175,6 +175,20 @@ class DashboardServer(
     fun stop() {
         server?.stop(1000, 2000)
         scope.cancel()
+    }
+
+    /**
+     * Hot-rebinds the dashboard to [newHost] WITHOUT an extension reload (see
+     * [McpServerManager.rebind]). Stops the listener, swaps the host, restarts on a fresh scope.
+     * Runs on the caller's thread (blocks briefly) — the UI calls this OFF the EDT.
+     */
+    fun rebind(newHost: String) {
+        server?.stop(500, 1500)
+        server = null
+        scope.cancel()
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        bindHost = newHost
+        start()
     }
 
     private fun getDashboardHtml(): String {
