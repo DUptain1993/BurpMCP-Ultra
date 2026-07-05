@@ -76,7 +76,7 @@ items discovered during live validation, and project-maturity gaps.
 | Version | Type | Theme | Contents |
 |---|---|---|---|
 | **2.1.1** | patch | **✅ RELEASED** (2026-06-25) | connection-config root `/` + token across all surfaces (single-sourced via `ConnectionInfo`); enum-validation B1–B7 (silent-failure bugs); proxy_history_search url; version single-source; README accuracy; LICENSE |
-| **2.2.0** | minor | Reliability & persistence | dashboard activity persistence *(done)*; bounded outbound sends *(done)*; activity-UI restore fix *(done)*; **SSE write-timeout + session watchdog** — the 57-min hang fix *(done)*; **configurable bind host** (issue #4 / PR #6 by @Spark0618, security-gated) *(done)* — operator-gated non-loopback bind + live "Save & Rebind Now" + partial-init hardening |
+| **2.2.0** | minor | **✅ RELEASED** (2026-07-05) · Reliability & persistence | dashboard activity persistence *(done)*; bounded outbound sends *(done)*; activity-UI restore fix *(done)*; **SSE write-timeout + session watchdog** — the 57-min hang fix *(done)*; **configurable bind host** (issue #4 / PR #6 by @Spark0618, security-gated) *(done)* — operator-gated non-loopback bind + live "Save & Rebind Now" + partial-init hardening |
 | **2.1.2 / 2.2.x** | patch/minor | Validation & DX | live-test all 149 tools (C6, C7, S7); S6 redaction, token rotation, active-tool throttle; CI (Actions), CHANGELOG/CONTRIBUTING/SECURITY, D5, D7, tool-count single-source |
 | **2.3.0** | minor | Smuggling | N8 HTTP request smuggling |
 | **2.4.0** | minor | Race | N10 single-packet / HTTP-2 race |

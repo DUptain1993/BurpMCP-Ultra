@@ -4,7 +4,7 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
-## [2.2.0] — Reliability, persistence & networking *(pending release)*
+## [2.2.0] — 2026-07-05 — Reliability, persistence & networking
 
 Theme: reliability & persistence, plus the community-requested configurable bind host.
 
