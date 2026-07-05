@@ -7,11 +7,13 @@
 Drop a single JAR into Burp, connect Claude Code (or any MCP client), and drive every
 part of Burp Suite programmatically through AI agents.
 
-[![Version](https://img.shields.io/badge/version-2.1.0-1f6feb)](https://github.com/Cy-S3c/BurpMCP-Ultra/releases)
+[![Latest release](https://img.shields.io/github/v/release/Cy-S3c/BurpMCP-Ultra?color=1f6feb&label=release)](https://github.com/Cy-S3c/BurpMCP-Ultra/releases/latest)
+[![Build](https://github.com/Cy-S3c/BurpMCP-Ultra/actions/workflows/build.yml/badge.svg)](https://github.com/Cy-S3c/BurpMCP-Ultra/actions/workflows/build.yml)
 [![License](https://img.shields.io/badge/license-MIT-3fb950)](#license)
 [![Burp Suite](https://img.shields.io/badge/Burp%20Suite-Professional-ff6633)](https://portswigger.net/burp)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.1.20-7F52FF?logo=kotlin&logoColor=white)](https://kotlinlang.org)
 [![MCP tools](https://img.shields.io/badge/MCP%20tools-149-8957e5)](#tools)
+[![Stars](https://img.shields.io/github/stars/Cy-S3c/BurpMCP-Ultra?style=flat&color=e3b341)](https://github.com/Cy-S3c/BurpMCP-Ultra/stargazers)
 [![Telegram](https://img.shields.io/badge/Telegram-%40D4RK__V0RT3X-2CA5E0?logo=telegram&logoColor=white)](https://t.me/D4RK_V0RT3X)
 
 **149 Tools** &bull; **8 Resources** &bull; **17 Event Types** &bull; Real-time Dashboard &bull; Hardened Localhost Security

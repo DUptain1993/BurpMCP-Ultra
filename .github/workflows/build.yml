@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # BurpMCP-Ultra must compile as JDK 17 bytecode (GitHub issue #2/#3): a JAR built with
+      # Java 22+ silently fails to bind the MCP SSE ports. CI pins JDK 17 to enforce this.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build + test
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build --no-daemon --stacktrace
