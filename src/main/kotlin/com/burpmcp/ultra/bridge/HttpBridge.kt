@@ -5,6 +5,7 @@ import burp.api.montoya.http.HttpMode
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.params.HttpParameter
 import com.burpmcp.ultra.safety.HeaderSafety
+import com.burpmcp.ultra.safety.RequestHygiene
 import com.burpmcp.ultra.safety.SafeRegex
 import com.burpmcp.ultra.safety.ScopeGate
 import burp.api.montoya.http.handler.HttpHandler
@@ -123,7 +124,8 @@ class HttpBridge(
             addToSitemap(result, "[MCP] http_send_request via BurpMCP-Ultra")
             ToolCallTracker.lastSentResult.set(result)
 
-            withScopeWarning(serializeRequestResponse(result, elapsedMs, maxBodyLength), scope.warning)
+            val hygiene = RequestHygiene.scan(method, url, headers)
+            withScopeWarning(withRequestWarnings(serializeRequestResponse(result, elapsedMs, maxBodyLength), hygiene), scope.warning)
         } catch (e: Exception) {
             buildJsonObject {
                 put("error", "Failed to send request: ${e.message}")
@@ -1100,6 +1102,14 @@ class HttpBridge(
     /** Returns [base] with a `scope_warning` field appended when [warning] is non-null. */
     private fun withScopeWarning(base: JsonObject, warning: String?): JsonObject =
         if (warning == null) base else JsonObject(base + ("scope_warning" to JsonPrimitive(warning)))
+
+    /**
+     * Attaches advisory request-hygiene warnings (raw CR/LF in method/url/headers — the cause of
+     * Burp "kettled" requests, GitHub issue #7) so the agent can self-correct. Advisory only.
+     */
+    private fun withRequestWarnings(base: JsonObject, warnings: List<String>): JsonObject =
+        if (warnings.isEmpty()) base
+        else JsonObject(base + ("warnings" to JsonArray(warnings.map { JsonPrimitive(it) })))
 
     // ---------------------------------------------------------------
     // Fuzzer (intruder-like payload injection)
