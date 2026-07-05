@@ -27,7 +27,10 @@ items discovered during live validation, and project-maturity gaps.
 - **Token rotation**.
 - **S8** — drop / justify the redundant secondary SSE port 9877.
 - **Active-tool throttle / rate-limit** — stop an agent hammering a live target.
-- **Configurable bind host** (issue #4) — opt-in `bind_host` to listen on a chosen NIC/IP
+- **Configurable bind host** — ✅ **DONE in 2.2.0** (issue #4 / PR #6 by @Spark0618, re-implemented
+  hardened). Operator-gated non-loopback bind (`mcp_allow_remote_bind`), live "Save & Rebind Now",
+  Host/CORS allowlist extended to the configured host + local NIC addresses. See `docs/SECURITY.md`.
+  Original scope: opt-in `bind_host` to listen on a chosen NIC/IP
   instead of the loopback-only `127.0.0.1` (for cross-machine / headless-Burp setups). The
   MCP server can *drive Burp* (send arbitrary requests, scan, shut down), so loopback-only is
   the intentional default; exposing it must be **security-gated**: extend the Host/Origin
@@ -73,7 +76,7 @@ items discovered during live validation, and project-maturity gaps.
 | Version | Type | Theme | Contents |
 |---|---|---|---|
 | **2.1.1** | patch | **✅ RELEASED** (2026-06-25) | connection-config root `/` + token across all surfaces (single-sourced via `ConnectionInfo`); enum-validation B1–B7 (silent-failure bugs); proxy_history_search url; version single-source; README accuracy; LICENSE |
-| **2.2.0** | minor | Reliability & persistence | dashboard activity persistence *(done)*; bounded outbound sends *(done)*; activity-UI restore fix *(done)*; **SSE write-timeout + session watchdog** — the 57-min hang fix *(remaining)*; **configurable bind host** (issue #4, security-gated) |
+| **2.2.0** | minor | Reliability & persistence | dashboard activity persistence *(done)*; bounded outbound sends *(done)*; activity-UI restore fix *(done)*; **SSE write-timeout + session watchdog** — the 57-min hang fix *(done)*; **configurable bind host** (issue #4 / PR #6 by @Spark0618, security-gated) *(done)* — operator-gated non-loopback bind + live "Save & Rebind Now" + partial-init hardening |
 | **2.1.2 / 2.2.x** | patch/minor | Validation & DX | live-test all 149 tools (C6, C7, S7); S6 redaction, token rotation, active-tool throttle; CI (Actions), CHANGELOG/CONTRIBUTING/SECURITY, D5, D7, tool-count single-source |
 | **2.3.0** | minor | Smuggling | N8 HTTP request smuggling |
 | **2.4.0** | minor | Race | N10 single-packet / HTTP-2 race |
