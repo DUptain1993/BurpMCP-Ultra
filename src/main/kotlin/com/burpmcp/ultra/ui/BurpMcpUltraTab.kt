@@ -7,6 +7,7 @@ import burp.api.montoya.ui.editor.EditorOptions
 import burp.api.montoya.ui.editor.HttpRequestEditor
 import burp.api.montoya.ui.editor.HttpResponseEditor
 import com.burpmcp.ultra.bridge.BridgeFactory
+import com.burpmcp.ultra.core.BuildInfo
 import com.burpmcp.ultra.core.ConnectionInfo
 import com.burpmcp.ultra.core.RebindOutcome
 import com.burpmcp.ultra.events.EventBus
@@ -85,6 +86,7 @@ class BurpMcpUltraTab(
         tabbedPane.addTab("Collaborator", buildCollaboratorTab())
         tabbedPane.addTab("Rules", buildRulesTab())
         tabbedPane.addTab("Server", buildServerTab())
+        mainPanel.add(UiTheme.brandHeader(BuildInfo.VERSION), BorderLayout.NORTH)
         mainPanel.add(tabbedPane, BorderLayout.CENTER)
 
         // Render persisted MCP activity (the deque is seeded on startup by the dashboard
@@ -116,7 +118,10 @@ class BurpMcpUltraTab(
             }
         }
 
+        // Let Burp theme its native editors first, then brand our own chrome dark + crimson
+        // (UiTheme.apply skips burp.* components so the request/response editors are untouched).
         api.userInterface().applyThemeToComponent(mainPanel)
+        UiTheme.apply(mainPanel)
     }
 
     fun getComponent(): Component = mainPanel

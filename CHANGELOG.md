@@ -4,6 +4,22 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
+## [2.3.0] — Unreleased
+
+### Fixed
+- **HTTP/2 "kettled" requests / `RST_STREAM` PROTOCOL_ERROR (issue #7, reopened)** — a stray CR/LF in
+  an LLM-supplied `url`, method, or header value could reach the HTTP/2 `:path` (the url-only path
+  passed the raw URL straight to Montoya's `httpRequestFromUrl`) and get the request rejected by the
+  server. `http_send_request` (and its `_parallel` / `_chain` siblings) now **strip control chars
+  from the structured inputs** before building the request; `raw_request` / `http_send_raw_bytes`
+  stay verbatim so intentional CRLF (request-smuggling research) still works. (`RequestHygiene.stripControl`)
+
+### Changed
+- **Native UI redesign** — a cohesive dark + crimson brand across the Burp extension tabs: a branded
+  gradient header, structured crimson section headers, styled tables (crimson headers, clean
+  selection), themed buttons/inputs, and a consistent palette + spacing. Burp's own request/response
+  editors are left untouched so they keep matching Burp's theme. (`UiTheme`)
+
 ## [2.2.2] — 2026-07-06
 
 ### Added
