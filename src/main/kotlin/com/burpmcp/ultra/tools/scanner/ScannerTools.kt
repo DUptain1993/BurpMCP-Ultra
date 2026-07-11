@@ -397,8 +397,8 @@ object ScannerTools {
                     putJsonObject("severity") { put("type", "string"); put("description", "Issue severity") }
                     putJsonObject("confidence") { put("type", "string"); put("description", "Issue confidence") }
                     putJsonObject("url") { put("type", "string"); put("description", "Affected URL") }
-                    putJsonObject("request") { put("type", "string"); put("description", "Associated HTTP request, base64-encoded. Both request and response must be provided together to attach evidence.") }
-                    putJsonObject("response") { put("type", "string"); put("description", "Associated HTTP response, base64-encoded. Both request and response must be provided together to attach evidence.") }
+                    putJsonObject("request") { put("type", "string"); put("description", "Associated HTTP request as plain text (base64 also accepted). Must be paired with 'response' to attach evidence.") }
+                    putJsonObject("response") { put("type", "string"); put("description", "Associated HTTP response as plain text (base64 also accepted). Must be paired with 'request' to attach evidence.") }
                 },
                 required = listOf("name", "url")
             )

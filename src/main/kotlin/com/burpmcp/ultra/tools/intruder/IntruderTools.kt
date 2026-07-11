@@ -110,11 +110,7 @@ object IntruderTools {
 
                 val positions = rawPositions.map { pos ->
                     when {
-                        pos is JsonArray -> {
-                            val start = pos[0].jsonPrimitive.int
-                            val end = pos[1].jsonPrimitive.int
-                            Pair(start, end)
-                        }
+                        pos is JsonArray -> IntruderValidation.parsePositionArray(pos)
                         pos is JsonObject -> {
                             val start = (pos["start"]?.jsonPrimitive?.intOrNull
                                 ?: pos["0"]?.jsonPrimitive?.intOrNull)
@@ -122,6 +118,8 @@ object IntruderTools {
                             val end = (pos["end"]?.jsonPrimitive?.intOrNull
                                 ?: pos["1"]?.jsonPrimitive?.intOrNull)
                                 ?: throw IllegalArgumentException("Position missing 'end' field")
+                            if (end < start) throw IllegalArgumentException(
+                                "position end ($end) must be >= start ($start)")
                             Pair(start, end)
                         }
                         else -> throw IllegalArgumentException("Invalid position format: $pos")
@@ -130,9 +128,20 @@ object IntruderTools {
 
                 val result = bridge.sendWithPositions(rawRequest, host, port, useTls, positions, tabName)
                 CallToolResult(content = listOf(TextContent(result.toString())))
-            } catch (e: Exception) {
+            } catch (e: IllegalArgumentException) {
+                // Validation failures carry a clean, descriptive message safe to surface.
                 CallToolResult(
-                    content = listOf(TextContent("""{"error":"${e.message}"}""")),
+                    content = listOf(TextContent(
+                        buildJsonObject { put("error", e.message ?: "invalid positions") }.toString()
+                    )),
+                    isError = true
+                )
+            } catch (e: Exception) {
+                // Never leak raw JDK internals (e.g. IndexOutOfBoundsException bounds text).
+                CallToolResult(
+                    content = listOf(TextContent(
+                        buildJsonObject { put("error", "internal error processing positions") }.toString()
+                    )),
                     isError = true
                 )
             }
@@ -193,6 +202,18 @@ object IntruderTools {
                 (args["regex_pattern"]?.jsonPrimitive?.contentOrNull)?.let { params["regex_pattern"] = it }
                 (args["regex_replacement"]?.jsonPrimitive?.contentOrNull)?.let { params["regex_replacement"] = it }
 
+                // BUG #33: eagerly validate regex_replace inputs at registration time so an
+                // invalid pattern is rejected here instead of silently failing later, mid-attack,
+                // when each payload is processed.
+                if (transformType == "regex_replace") {
+                    IntruderValidation.regexError(params)?.let { errObj ->
+                        return@addTool CallToolResult(
+                            content = listOf(TextContent(errObj.toString())),
+                            isError = true
+                        )
+                    }
+                }
+
                 val result = bridge.registerPayloadProcessor(name, transformType, params)
                 CallToolResult(content = listOf(TextContent(result.toString())))
             } catch (e: Exception) {
@@ -200,6 +221,59 @@ object IntruderTools {
                     content = listOf(TextContent("""{"error":"${e.message}"}""")),
                     isError = true
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Pure, Burp-free validation helpers for the Intruder tools. Kept in this file (which the
+ * owning agent controls) so the parsing/validation rules can be unit-tested without a live
+ * Montoya API.
+ */
+internal object IntruderValidation {
+
+    /**
+     * BUG #16: parse a JSON `[start, end]` position pair with strict arity validation.
+     *
+     * The previous implementation indexed `pos[0]`/`pos[1]` directly, which leaked a raw
+     * [IndexOutOfBoundsException] for a too-short array and silently ignored extra elements
+     * for a too-long array. This validates exact arity and integer-ness up front so both
+     * failure modes surface an identical, descriptive [IllegalArgumentException] that the
+     * tool layer renders as a clean `{"error":...}` response.
+     */
+    fun parsePositionArray(pos: JsonArray): Pair<Int, Int> {
+        if (pos.size != 2) throw IllegalArgumentException(
+            "each position must be a [start,end] pair (got ${pos.size} element(s))")
+        val start = pos[0].jsonPrimitive.intOrNull
+            ?: throw IllegalArgumentException("position start must be an integer")
+        val end = pos[1].jsonPrimitive.intOrNull
+            ?: throw IllegalArgumentException("position end must be an integer")
+        if (end < start) throw IllegalArgumentException(
+            "position end ($end) must be >= start ($start)")
+        return Pair(start, end)
+    }
+
+    /**
+     * BUG #33: eagerly validate the regex of a `regex_replace` payload processor.
+     *
+     * Returns a `{"error":...}` [JsonObject] when the pattern is missing/blank or cannot be
+     * compiled, or `null` when the pattern is valid. Registering with an invalid pattern used
+     * to succeed and only blow up later, once per payload, during a live attack.
+     */
+    fun regexError(params: Map<String, String>): JsonObject? {
+        val pattern = params["regex_pattern"]
+        if (pattern.isNullOrEmpty()) {
+            return buildJsonObject {
+                put("error", "regex_replace requires a non-empty regex_pattern")
+            }
+        }
+        return try {
+            Regex(pattern)
+            null
+        } catch (e: Exception) {
+            buildJsonObject {
+                put("error", "Invalid regex_pattern: ${e.message ?: "could not compile pattern"}")
             }
         }
     }

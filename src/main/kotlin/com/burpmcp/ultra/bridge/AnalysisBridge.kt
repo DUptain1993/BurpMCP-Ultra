@@ -23,7 +23,16 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * path, headers, cookies, parameters, body, and content type.
      */
     fun analyzeRequest(rawRequest: String): JsonObject {
-        val httpRequest = HttpRequest.httpRequest(rawRequest)
+        if (rawRequest.isBlank()) {
+            return buildJsonObject {
+                put("error", "Empty request: provide a raw HTTP request (e.g. 'GET / HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n').")
+            }
+        }
+        val httpRequest = try {
+            HttpRequest.httpRequest(normalizeCrlf(rawRequest))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse request: ${describe(e)}") }
+        }
 
         val headers = buildJsonArray {
             for (header in httpRequest.headers()) {
@@ -76,7 +85,16 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * reason phrase, headers, cookies, body, and MIME types.
      */
     fun analyzeResponse(rawResponse: String): JsonObject {
-        val httpResponse = HttpResponse.httpResponse(rawResponse)
+        if (rawResponse.isBlank()) {
+            return buildJsonObject {
+                put("error", "Empty response: provide a raw HTTP response (e.g. 'HTTP/1.1 200 OK\\r\\n\\r\\n...').")
+            }
+        }
+        val httpResponse = try {
+            HttpResponse.httpResponse(normalizeCrlf(rawResponse))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse response: ${describe(e)}") }
+        }
 
         val headers = buildJsonArray {
             for (header in httpResponse.headers()) {
@@ -129,8 +147,19 @@ class AnalysisBridge(private val api: MontoyaApi) {
         rawResponse: String,
         additionalValues: List<String>
     ): JsonObject {
-        val httpRequest = HttpRequest.httpRequest(rawRequest)
-        val httpResponse = HttpResponse.httpResponse(rawResponse)
+        if (rawRequest.isBlank() || rawResponse.isBlank()) {
+            return buildJsonObject {
+                put("error", "Both request and response must be non-empty raw HTTP messages.")
+            }
+        }
+        val httpRequest: HttpRequest
+        val httpResponse: HttpResponse
+        try {
+            httpRequest = HttpRequest.httpRequest(normalizeCrlf(rawRequest))
+            httpResponse = HttpResponse.httpResponse(normalizeCrlf(rawResponse))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse request/response: ${describe(e)}") }
+        }
         val responseBody = httpResponse.bodyToString()
 
         // Collect all candidate values from request parameters
@@ -190,7 +219,16 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * extracts nested keys. For XML bodies, extracts element/attribute values.
      */
     fun extractParams(rawRequest: String): JsonObject {
-        val httpRequest = HttpRequest.httpRequest(rawRequest)
+        if (rawRequest.isBlank()) {
+            return buildJsonObject {
+                put("error", "Empty request: provide a raw HTTP request (e.g. 'GET /?a=1 HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n').")
+            }
+        }
+        val httpRequest = try {
+            HttpRequest.httpRequest(normalizeCrlf(rawRequest))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse request: ${describe(e)}") }
+        }
 
         val urlParams = buildJsonArray {
             for (param in httpRequest.parameters()) {
@@ -357,7 +395,10 @@ class AnalysisBridge(private val api: MontoyaApi) {
             // URL path segments
             val path = httpRequest.path()
             if (path != null) {
-                val segments = path.split("/").filter { it.isNotEmpty() }
+                // Strip the query string (and any fragment) so the final path
+                // segment isn't polluted with "?foo=bar"; URL parameters are
+                // enumerated separately above as url_parameter insertion points.
+                val segments = pathSegments(path)
                 segments.forEachIndexed { idx, segment ->
                     addJsonObject {
                         put("type", "url_path_segment")
@@ -389,6 +430,11 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * @param type "request" or "response".
      */
     fun diff(item1: String, item2: String, type: String): JsonObject {
+        if (item1.isBlank() || item2.isBlank()) {
+            return buildJsonObject {
+                put("error", "Both item1 and item2 must be non-empty raw HTTP messages for type='$type'.")
+            }
+        }
         return when (type.lowercase()) {
             "request" -> diffRequests(item1, item2)
             "response" -> diffResponses(item1, item2)
@@ -473,14 +519,16 @@ class AnalysisBridge(private val api: MontoyaApi) {
         authLevels: List<JsonObject>,
         compareFields: List<String>?
     ): JsonObject {
+        if (request.isBlank()) {
+            return buildJsonObject {
+                put("error", "Empty request: provide a raw HTTP request (e.g. 'GET /api/resource HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n').")
+            }
+        }
         return try {
             val service = HttpService.httpService(host, port, useTls)
             scopeGate.deny((if (useTls) "https" else "http") + "://$host:$port/")?.let { return it }
             // Normalize request
-            val baseRequest = request
-                .replace("\\r\\n", "\r\n")
-                .replace("\\n", "\n")
-                .replace(Regex("(?<!\r)\n"), "\r\n")
+            val baseRequest = normalizeCrlf(request)
 
             data class AuthResult(
                 val levelName: String,
@@ -530,7 +578,7 @@ class AnalysisBridge(private val api: MontoyaApi) {
                         responseTime = elapsed
                     ))
                 } catch (e: Exception) {
-                    errors.add("Level '$levelName' failed: ${e.message}")
+                    errors.add("Level '$levelName' failed: ${describe(e)}")
                 }
             }
 
@@ -632,13 +680,17 @@ class AnalysisBridge(private val api: MontoyaApi) {
                 }
             }
         } catch (e: Exception) {
-            buildJsonObject { put("error", "Auth diff failed: ${e.message}") }
+            buildJsonObject { put("error", "Auth diff failed: ${describe(e)}") }
         }
     }
 
     // ---------------------------------------------------------------
     // Private helper methods
     // ---------------------------------------------------------------
+
+    private fun normalizeCrlf(raw: String): String = normalizeCrlfMessage(raw)
+
+    private fun describe(e: Throwable): String = describeException(e)
 
     /**
      * Determines the HTML/JS context surrounding a reflected value.
@@ -775,8 +827,14 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * Compares two raw HTTP requests.
      */
     private fun diffRequests(raw1: String, raw2: String): JsonObject {
-        val req1 = HttpRequest.httpRequest(raw1)
-        val req2 = HttpRequest.httpRequest(raw2)
+        val req1: HttpRequest
+        val req2: HttpRequest
+        try {
+            req1 = HttpRequest.httpRequest(normalizeCrlf(raw1))
+            req2 = HttpRequest.httpRequest(normalizeCrlf(raw2))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse request: ${describe(e)}") }
+        }
 
         val headerDiffs = diffHeaders(
             req1.headers().associate { it.name() to it.value() },
@@ -830,8 +888,14 @@ class AnalysisBridge(private val api: MontoyaApi) {
      * Compares two raw HTTP responses.
      */
     private fun diffResponses(raw1: String, raw2: String): JsonObject {
-        val resp1 = HttpResponse.httpResponse(raw1)
-        val resp2 = HttpResponse.httpResponse(raw2)
+        val resp1: HttpResponse
+        val resp2: HttpResponse
+        try {
+            resp1 = HttpResponse.httpResponse(normalizeCrlf(raw1))
+            resp2 = HttpResponse.httpResponse(normalizeCrlf(raw2))
+        } catch (e: Exception) {
+            return buildJsonObject { put("error", "Failed to parse response: ${describe(e)}") }
+        }
 
         val headerDiffs = diffHeaders(
             resp1.headers().associate { it.name() to it.value() },
@@ -901,5 +965,50 @@ class AnalysisBridge(private val api: MontoyaApi) {
 
         if (total == 0) return 100.0
         return Math.round((2.0 * intersection / total) * 10000.0) / 100.0
+    }
+
+    /**
+     * Pure, Burp-independent helpers. Kept `internal` so unit tests can
+     * exercise the parsing/validation logic without a live Montoya API
+     * (the API is compileOnly and cannot be instantiated in tests).
+     */
+    internal companion object {
+
+        /**
+         * Normalizes line endings in a raw HTTP message to canonical CRLF.
+         *
+         * Callers frequently supply messages using bare LF delimiters (either
+         * as literal newlines or as the escaped "\n"/"\r\n" sequences that
+         * survive JSON transport). Montoya's parser is strict about CRLF header
+         * delimiting, so an LF-only message would otherwise have its headers
+         * silently dropped. Mirrors the 3-step normalization used in authDiff().
+         */
+        fun normalizeCrlfMessage(raw: String): String =
+            raw.replace("\\r\\n", "\r\n")
+                .replace("\\n", "\n")
+                .replace(Regex("(?<!\r)\n"), "\r\n")
+
+        /**
+         * Produces a caller-safe description of a thrown exception. Some Montoya
+         * internals raise exceptions with a null message (e.g. a bare
+         * StringIndexOutOfBoundsException), which would otherwise surface as the
+         * literal string "null" to MCP callers. Falling back to the simple class
+         * name keeps the error actionable without leaking raw internals.
+         */
+        fun describeException(e: Throwable): String {
+            val msg = e.message
+            return if (msg.isNullOrBlank()) e.javaClass.simpleName else msg
+        }
+
+        /**
+         * Splits a request path into non-empty segments, stripping any query
+         * string and fragment first so the final segment isn't polluted with
+         * "?foo=bar". URL parameters are enumerated separately as insertion
+         * points, so they must not leak into the path-segment enumeration.
+         */
+        fun pathSegments(path: String): List<String> =
+            path.substringBefore("?").substringBefore("#")
+                .split("/")
+                .filter { it.isNotEmpty() }
     }
 }

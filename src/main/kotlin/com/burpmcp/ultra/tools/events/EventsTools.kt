@@ -32,6 +32,7 @@ object EventsTools {
                 val args = request.params.arguments ?: emptyMap()
                 val sinceId = args["since_id"]?.jsonPrimitive?.longOrNull ?: 0L
                 val maxEvents = args["max_events"]?.jsonPrimitive?.intOrNull ?: 200
+                validateMaxEvents(maxEvents)?.let { return@addTool it }
 
                 val events = eventBus.getEvents(sinceId, maxEvents)
                 val result = buildJsonObject {
@@ -81,6 +82,7 @@ object EventsTools {
 
                 val sinceId = args["since_id"]?.jsonPrimitive?.longOrNull ?: 0L
                 val maxEvents = args["max_events"]?.jsonPrimitive?.intOrNull ?: 200
+                validateMaxEvents(maxEvents)?.let { return@addTool it }
 
                 val events = eventBus.getEventsByType(types, sinceId, maxEvents)
                 val result = buildJsonObject {
@@ -212,6 +214,24 @@ object EventsTools {
                 )
             }
         }
+    }
+
+    /**
+     * Validates the max_events argument at the tool boundary. Returns a clean,
+     * client-facing error [CallToolResult] when the value is negative, or null
+     * when the value is acceptable. This gives MCP clients an explicit,
+     * actionable message instead of leaking Kotlin's internal
+     * `IllegalArgumentException` from [Iterable.take].
+     */
+    internal fun validateMaxEvents(maxEvents: Int): CallToolResult? {
+        if (maxEvents < 0) {
+            val body = buildJsonObject { put("error", "max_events must be >= 0") }
+            return CallToolResult(
+                content = listOf(TextContent(body.toString())),
+                isError = true
+            )
+        }
+        return null
     }
 
     /**

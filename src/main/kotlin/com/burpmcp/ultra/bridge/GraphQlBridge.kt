@@ -32,7 +32,9 @@ class GraphQlBridge(private val api: MontoyaApi) {
             val introBody = postQuery(url, GraphQl.INTROSPECTION_QUERY)
             val introJson = try { Json.parseToJsonElement(introBody).jsonObject } catch (_: Exception) { null }
 
-            if (introJson?.get("data")?.jsonObject?.get("__schema") != null) {
+            // `as? JsonObject` returns null for JsonNull / non-objects, so error-only or
+            // null-valued introspection responses fall through to the suggestion path safely.
+            if ((introJson?.get("data") as? JsonObject)?.get("__schema") != null) {
                 buildJsonObject {
                     put("endpoint", url)
                     put("introspection", GraphQl.summarize(introJson))

@@ -42,7 +42,14 @@ object BambdaTools {
                 }
 
                 val result = bridge.importBambda(script)
-                CallToolResult(content = listOf(TextContent(result.toString())))
+                // Surface a compile failure as a hard error so the caller does not
+                // mistake a LOADED_WITH_ERRORS import for a clean success.
+                val importFailed = result["status"]?.jsonPrimitive?.contentOrNull == "imported_with_errors" ||
+                    result.containsKey("error")
+                CallToolResult(
+                    content = listOf(TextContent(result.toString())),
+                    isError = importFailed
+                )
             } catch (e: Exception) {
                 CallToolResult(
                     content = listOf(TextContent("""{"error":"${e.message}"}""")),

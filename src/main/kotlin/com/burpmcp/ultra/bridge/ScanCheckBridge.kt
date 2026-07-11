@@ -85,6 +85,7 @@ class ScanCheckBridge(
         return try {
             EnumValidation.error(severity, VALID_SEVERITIES, "severity", required = true)?.let { return it }
             EnumValidation.error(confidence, VALID_CONFIDENCES, "confidence", required = true)?.let { return it }
+            ScanCheckValidation.nonEmptyError(conditions, "conditions", "condition")?.let { return it }
             validateConditions(conditions, "conditions")?.let { return it }
             val auditSeverity = parseSeverity(severity)
             val auditConfidence = parseConfidence(confidence)
@@ -204,6 +205,7 @@ class ScanCheckBridge(
         return try {
             EnumValidation.error(severity, VALID_SEVERITIES, "severity", required = true)?.let { return it }
             EnumValidation.error(confidence, VALID_CONFIDENCES, "confidence", required = true)?.let { return it }
+            ScanCheckValidation.nonEmptyError(steps, "steps", "step")?.let { return it }
             steps.forEachIndexed { i, step ->
                 val rc = step["response_conditions"]?.jsonArray?.filterIsInstance<JsonObject>() ?: emptyList()
                 validateConditions(rc, "steps[$i].response_conditions")?.let { return it }
@@ -657,5 +659,35 @@ class ScanCheckBridge(
             EnumValidation.error(ct, VALID_CONDITION_TYPES, "$prefix[$i].condition_type")?.let { return it }
         }
         return null
+    }
+}
+
+/**
+ * Pure, Burp-free validation helpers for scan-check registration.
+ *
+ * Extracted so the emptiness guards can be unit-tested without a live
+ * [MontoyaApi]/[StateManager]. Rejecting an empty rule set at registration
+ * time keeps the failure consistent with the per-condition
+ * [ScanCheckBridge]-level enum validation, instead of deploying a check that
+ * can never fire (empty AND-chain) or, worse, a negated one that fires on
+ * everything.
+ */
+internal object ScanCheckValidation {
+    /**
+     * Returns an `{"error": ...}` object when [items] is empty, else null.
+     *
+     * @param items The parsed rule objects (conditions or steps).
+     * @param paramName The parameter name as surfaced to the agent (e.g. "steps").
+     * @param elementNoun Singular noun for the element (e.g. "step", "condition").
+     */
+    fun nonEmptyError(
+        items: List<JsonObject>,
+        paramName: String,
+        elementNoun: String
+    ): JsonObject? {
+        if (items.isNotEmpty()) return null
+        return buildJsonObject {
+            put("error", "Parameter '$paramName' must contain at least one $elementNoun object")
+        }
     }
 }

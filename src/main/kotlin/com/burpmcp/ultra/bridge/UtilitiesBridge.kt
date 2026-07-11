@@ -134,11 +134,20 @@ class UtilitiesBridge(private val api: MontoyaApi) {
      * Compresses data using the specified algorithm.
      *
      * @param data Base64-encoded input data.
-     * @param algorithm One of: GZIP, DEFLATE, BROTLI.
+     * @param algorithm One of: GZIP, DEFLATE. (BROTLI is decompress-only in Burp.)
      * @return JSON object with the base64-encoded compressed data.
      */
     fun compress(data: String, algorithm: String): JsonObject {
         val compressionType = resolveCompressionType(algorithm)
+        // Burp's CompressionUtils.compress() only supports GZIP/DEFLATE. BROTLI is
+        // decompress-only, so reject it up front with an extension-owned message rather
+        // than letting Montoya throw an opaque error (or silently mishandle it).
+        if (compressionType == CompressionType.BROTLI) {
+            throw IllegalArgumentException(
+                "BROTLI compression is not supported by Burp; use GZIP or DEFLATE. " +
+                    "(BROTLI is available for util_decompress only.)"
+            )
+        }
         val decodedBytes = Base64.getDecoder().decode(data)
         val inputBytes = BurpByteArray.byteArray(*decodedBytes)
         val compressed = api.utilities().compressionUtils().compress(inputBytes, compressionType)
@@ -167,9 +176,26 @@ class UtilitiesBridge(private val api: MontoyaApi) {
     fun decompress(data: String, algorithm: String): JsonObject {
         val compressionType = resolveCompressionType(algorithm)
         val decodedBytes = Base64.getDecoder().decode(data)
+        // Reject empty input and input whose leading bytes don't match the declared
+        // container format up front. Burp's decompress() tends to silently echo (or
+        // truncate) malformed/wrong-format input rather than throwing, so without this
+        // check a caller can't tell a successful no-op from a genuine decompression.
+        validateCompressedInput(decodedBytes, compressionType)
         val inputBytes = BurpByteArray.byteArray(*decodedBytes)
         val decompressed = api.utilities().compressionUtils().decompress(inputBytes, compressionType)
-        val encodedResult = Base64.getEncoder().encodeToString(decompressed.getBytes())
+        val outputBytes = decompressed.getBytes()
+        // Detect the silent-echo failure mode: if Burp handed back exactly the bytes we
+        // gave it, decompression did not actually occur (valid compressed streams do not
+        // round-trip to their own compressed form). Treat that as a hard error.
+        if (isEchoedDecompression(decodedBytes, outputBytes)) {
+            throw IllegalArgumentException(
+                "Failed to decompress input as $compressionType: the data is not a valid " +
+                    "$compressionType stream (output was identical to the compressed input). " +
+                    "Check that 'algorithm' matches how the data was compressed and that " +
+                    "'data' is the raw base64-encoded compressed bytes."
+            )
+        }
+        val encodedResult = Base64.getEncoder().encodeToString(outputBytes)
 
         return buildJsonObject {
             put("algorithm", compressionType.name)
@@ -178,7 +204,7 @@ class UtilitiesBridge(private val api: MontoyaApi) {
             put("decompressed_size", decompressed.length())
             // Try to include the decompressed string if it's valid UTF-8
             try {
-                val text = String(decompressed.getBytes(), Charsets.UTF_8)
+                val text = String(outputBytes, Charsets.UTF_8)
                 put("decompressed_text", text)
             } catch (_: Exception) {
                 // Binary content; base64 only
@@ -512,4 +538,47 @@ class UtilitiesBridge(private val api: MontoyaApi) {
     // It was a raw ProcessBuilder mis-documented as "Burp's safe shell API" and,
     // with the previously unauthenticated transports, an RCE primitive reachable
     // from any website the operator visited. Do not reintroduce it.
+
+    companion object {
+        /**
+         * Validates that [decodedBytes] plausibly holds a compressed stream of the
+         * declared [type] before it is handed to Burp for decompression. Rejects empty
+         * input and, for formats with a recognizable header (GZIP), input whose magic
+         * bytes do not match. DEFLATE (raw/zlib) and BROTLI have no reliable fixed magic,
+         * so only the empty-input guard applies there; the echo check downstream catches
+         * the rest.
+         *
+         * Pure, API-free helper so it can be unit-tested without a live Burp API.
+         */
+        fun validateCompressedInput(decodedBytes: ByteArray, type: CompressionType) {
+            if (decodedBytes.isEmpty()) {
+                throw IllegalArgumentException(
+                    "Cannot decompress empty input: 'data' decoded to zero bytes."
+                )
+            }
+            if (type == CompressionType.GZIP) {
+                // GZIP streams always start with the magic bytes 0x1f 0x8b (RFC 1952).
+                val looksGzip = decodedBytes.size >= 2 &&
+                    (decodedBytes[0].toInt() and 0xFF) == 0x1f &&
+                    (decodedBytes[1].toInt() and 0xFF) == 0x8b
+                if (!looksGzip) {
+                    throw IllegalArgumentException(
+                        "Input is not a valid GZIP stream: missing GZIP magic bytes " +
+                            "(0x1f 0x8b). Check that 'algorithm' matches how the data was " +
+                            "compressed and that 'data' is the raw base64-encoded compressed bytes."
+                    )
+                }
+            }
+        }
+
+        /**
+         * Returns true when the decompressor produced output byte-for-byte identical to
+         * its compressed input, which indicates Burp silently echoed malformed/wrong-format
+         * data instead of decompressing it. A genuine compressed stream never round-trips
+         * to its own compressed form, so this is a safe failure signal. Pure helper.
+         */
+        fun isEchoedDecompression(inputBytes: ByteArray, outputBytes: ByteArray): Boolean {
+            return inputBytes.contentEquals(outputBytes)
+        }
+    }
 }

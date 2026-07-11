@@ -199,7 +199,7 @@ Returns array of results in original order, plus group_timings_ms and groups_dis
             description = "Send a chain of HTTP requests sequentially with variable extraction between steps. Each step can extract values from the response using regex (capture groups) and inject them into subsequent steps via {{variable}} placeholders. Useful for CSRF tokens, session tokens, and multi-step workflows.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
-                    putJsonObject("steps") { put("type", "array"); putJsonObject("items") { put("type", "object") }; put("description", "Array of step objects with url/raw_request and optional extract definitions") }
+                    putJsonObject("steps") { put("type", "array"); putJsonObject("items") { put("type", "object") }; put("description", "Array of step objects with url/raw_request and an optional 'extract' key. 'extract' MUST be an ARRAY of {name,pattern,from} objects (from = \"body\" or \"header\"), e.g. extract:[{\"name\":\"csrf\",\"pattern\":\"name=csrf value=([^ ]+)\",\"from\":\"body\"}]. Passing a single object instead of an array is rejected with a validation error.") }
                     putJsonObject("http_mode") { put("type", "string"); put("description", "AUTO | HTTP_1 | HTTP_2 | HTTP_2_IGNORE_ALPN") }
                     putJsonObject("stop_on_error") { put("type", "boolean"); put("description", "Stop the chain on the first error (default true)") }
                 },

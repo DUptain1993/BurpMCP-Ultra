@@ -316,12 +316,28 @@ class HttpBridge(
 
                 addToSitemap(result, "[MCP] Chain step $index via BurpMCP-Ultra")
 
-                // Extract variables from the response
-                val extractions = substitutedStep["extract"]?.jsonArray ?: JsonArray(emptyList())
+                // Extract variables from the response. 'extract' MUST be a JSON array of
+                // {name,pattern,from} objects. A raw .jsonArray accessor throws a cryptic
+                // kotlinx exception when a client passes a single object instead — shape-check
+                // it and emit an actionable validation message in the codebase's existing style.
+                val extractElem = substitutedStep["extract"]
+                val extractions = when (extractElem) {
+                    null, JsonNull -> JsonArray(emptyList())
+                    is JsonArray -> extractElem
+                    else -> throw IllegalArgumentException(
+                        "'extract' must be a JSON ARRAY of {name,pattern,from} objects, e.g. " +
+                            "extract:[{\"name\":\"csrf\",\"pattern\":\"...\",\"from\":\"body\"}]. " +
+                            "Got ${extractElem::class.simpleName}."
+                    )
+                }
                 val extractedInStep = mutableMapOf<String, String>()
 
                 for (extractDef in extractions) {
-                    val extractObj = extractDef.jsonObject
+                    val extractObj = extractDef as? JsonObject
+                        ?: throw IllegalArgumentException(
+                            "Each 'extract' item must be a JSON OBJECT with {name,pattern,from}. " +
+                                "Got ${extractDef::class.simpleName}."
+                        )
                     val varName = extractObj["name"]?.jsonPrimitive?.contentOrNull ?: continue
                     val pattern = extractObj["pattern"]?.jsonPrimitive?.contentOrNull ?: continue
                     val from = extractObj["from"]?.jsonPrimitive?.contentOrNull ?: "body"
@@ -445,7 +461,11 @@ class HttpBridge(
                 null
             }
 
-            api.http().cookieJar().setCookie(name, value, domain, path, expirationDate)
+            // Montoya's signature is setCookie(name, value, path, domain, expiration):
+            // path comes BEFORE domain. Passing our (domain, path) in Montoya's (path, domain)
+            // slots transposes them, so a cookie set for domain=example.com path=/app would
+            // land as path=example.com domain=/app. Order the args to match Montoya exactly.
+            api.http().cookieJar().setCookie(name, value, path, domain, expirationDate)
 
             buildJsonObject {
                 put("cookie_set", true)
@@ -485,25 +505,51 @@ class HttpBridge(
                 .replace("\\r\\n", "\r\n")
                 .replace("\\n", "\n")
                 .replace(Regex("(?<!\r)\n"), "\r\n")
-            val httpResponse = HttpResponse.httpResponse(normalizedResponse)
-            val analyzer = api.http().createResponseKeywordsAnalyzer(keywords)
-            analyzer.updateWith(httpResponse)
+            if (caseSensitive) {
+                // Montoya's analyzer is case-INSENSITIVE only. Honour case_sensitive=true by
+                // counting exact substring occurrences ourselves over the normalized response,
+                // then deriving present (variant) vs absent (invariant) from those manual counts.
+                // A single response has no cross-response variation baseline, so "present" == count>0.
+                val counts = HttpKeywordCount.countCaseSensitive(normalizedResponse, keywords)
+                buildJsonObject {
+                    put("case_sensitive", true)
+                    put("variant_keywords", buildJsonArray {
+                        counts.filterValues { it > 0 }.keys.forEach { add(it) }
+                    })
+                    put("invariant_keywords", buildJsonArray {
+                        counts.filterValues { it == 0 }.keys.forEach { add(it) }
+                    })
+                    put("keyword_counts", buildJsonArray {
+                        counts.forEach { (kw, c) ->
+                            add(buildJsonObject {
+                                put("keyword", kw)
+                                put("count", c)
+                            })
+                        }
+                    })
+                }
+            } else {
+                val httpResponse = HttpResponse.httpResponse(normalizedResponse)
+                val analyzer = api.http().createResponseKeywordsAnalyzer(keywords)
+                analyzer.updateWith(httpResponse)
 
-            buildJsonObject {
-                put("variant_keywords", buildJsonArray {
-                    analyzer.variantKeywords().forEach { add(it) }
-                })
-                put("invariant_keywords", buildJsonArray {
-                    analyzer.invariantKeywords().forEach { add(it) }
-                })
-                put("keyword_counts", buildJsonArray {
-                    httpResponse.keywordCounts(*keywords.toTypedArray()).forEach { kc ->
-                        add(buildJsonObject {
-                            put("keyword", kc.keyword())
-                            put("count", kc.count())
-                        })
-                    }
-                })
+                buildJsonObject {
+                    put("case_sensitive", false)
+                    put("variant_keywords", buildJsonArray {
+                        analyzer.variantKeywords().forEach { add(it) }
+                    })
+                    put("invariant_keywords", buildJsonArray {
+                        analyzer.invariantKeywords().forEach { add(it) }
+                    })
+                    put("keyword_counts", buildJsonArray {
+                        httpResponse.keywordCounts(*keywords.toTypedArray()).forEach { kc ->
+                            add(buildJsonObject {
+                                put("keyword", kc.keyword())
+                                put("count", kc.count())
+                            })
+                        }
+                    })
+                }
             }
         } catch (e: Exception) {
             buildJsonObject {
@@ -1174,100 +1220,36 @@ class HttpBridge(
                 .replace("\\n", "\n")
                 .replace(Regex("(?<!\r)\n"), "\r\n")
 
-            // Determine injection mode
-            val effectiveMarker = marker ?: "§"
-            val hasFuzzKeyword = baseRequest.contains("FUZZ")
-            val hasMarkerPairs = baseRequest.contains(effectiveMarker) &&
-                baseRequest.count { it == effectiveMarker[0] } >= 2
+            // Resolve injection points via the pure planner (FUZZ keyword / custom-marker pairs /
+            // legacy offsets). This fixes the custom multi-char marker no-op and rejects reversed
+            // or out-of-bounds offset pairs with an actionable message instead of corrupting/throwing.
+            val plan = when (val p = HttpFuzzPlan.plan(baseRequest, positions, payloads, marker)) {
+                is HttpFuzzPlan.Result.Error -> return buildJsonObject { put("error", p.message) }
+                is HttpFuzzPlan.Result.Ok -> p
+            }
 
-            when {
-                // Mode 1: FUZZ keyword — replace every occurrence of "FUZZ" with each payload
-                hasFuzzKeyword && !hasMarkerPairs -> {
-                    for (payload in payloads) {
-                        val modified = baseRequest.replace("FUZZ", payload)
-                        val httpRequest = HttpRequest.httpRequest(service, modified)
-                        val startTime = System.nanoTime()
-                        val result = api.http().sendRequest(httpRequest, mode)
-                        val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
-                        addToSitemap(result, "[MCP] Fuzz payload=$payload via BurpMCP-Ultra")
+            for (planned in plan.requests) {
+                // Encode the substituted request with an EXPLICIT UTF-8 charset so astral /
+                // multi-byte payloads (emoji, non-Latin scripts) survive intact. Handing the
+                // String straight to Montoya's String overload previously corrupted them.
+                val reqBytes = planned.request.toByteArray(Charsets.UTF_8)
+                val httpRequest = HttpRequest.httpRequest(service, BurpByteArray.byteArray(*reqBytes))
+                val startTime = System.nanoTime()
+                val result = api.http().sendRequest(httpRequest, mode)
+                val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
+                addToSitemap(result, "[MCP] Fuzz ${plan.mode} pos=${planned.position} payload=${planned.payload}")
 
-                        results.add(buildJsonObject {
-                            put("payload", payload)
-                            put("position", 0)
-                            serializeRequestResponse(result, elapsedMs, maxBodyLength).forEach { (k, v) -> put(k, v) }
-                        })
-                    }
-                }
-
-                // Mode 2: Marker pairs — find §value§ pairs, replace each with payloads (sniper mode)
-                hasMarkerPairs -> {
-                    // Find all marker-delimited positions
-                    val markerPositions = mutableListOf<Pair<Int, Int>>()
-                    var searchFrom = 0
-                    while (true) {
-                        val openIdx = baseRequest.indexOf(effectiveMarker, searchFrom)
-                        if (openIdx < 0) break
-                        val closeIdx = baseRequest.indexOf(effectiveMarker, openIdx + effectiveMarker.length)
-                        if (closeIdx < 0) break
-                        markerPositions.add(Pair(openIdx, closeIdx + effectiveMarker.length))
-                        searchFrom = closeIdx + effectiveMarker.length
-                    }
-
-                    for (payload in payloads) {
-                        for ((posIdx, pos) in markerPositions.withIndex()) {
-                            val (start, end) = pos
-                            val modified = baseRequest.substring(0, start) + payload + baseRequest.substring(end)
-                            val httpRequest = HttpRequest.httpRequest(service, modified)
-                            val startTime = System.nanoTime()
-                            val result = api.http().sendRequest(httpRequest, mode)
-                            val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
-                            addToSitemap(result, "[MCP] Fuzz marker pos=$posIdx payload=$payload")
-
-                            results.add(buildJsonObject {
-                                put("payload", payload)
-                                put("position", posIdx)
-                                serializeRequestResponse(result, elapsedMs, maxBodyLength).forEach { (k, v) -> put(k, v) }
-                            })
-                        }
-                    }
-                }
-
-                // Mode 3: Legacy offset-based positions
-                positions != null && positions.isNotEmpty() -> {
-                    for (payload in payloads) {
-                        for ((posIdx, pos) in positions.withIndex()) {
-                            val (start, end) = pos
-                            val modified = baseRequest.substring(0, start) + payload + baseRequest.substring(end)
-                            val httpRequest = HttpRequest.httpRequest(service, modified)
-                            val startTime = System.nanoTime()
-                            val result = api.http().sendRequest(httpRequest, mode)
-                            val elapsedMs = (System.nanoTime() - startTime) / 1_000_000
-                            addToSitemap(result, "[MCP] Fuzz offset pos=$posIdx payload=$payload")
-
-                            results.add(buildJsonObject {
-                                put("payload", payload)
-                                put("position", posIdx)
-                                serializeRequestResponse(result, elapsedMs, maxBodyLength).forEach { (k, v) -> put(k, v) }
-                            })
-                        }
-                    }
-                }
-
-                else -> {
-                    return buildJsonObject {
-                        put("error", "No injection points found. Use FUZZ keyword, §marker§ pairs, or positions array.")
-                    }
-                }
+                results.add(buildJsonObject {
+                    put("payload", planned.payload)
+                    put("position", planned.position)
+                    serializeRequestResponse(result, elapsedMs, maxBodyLength).forEach { (k, v) -> put(k, v) }
+                })
             }
 
             buildJsonObject {
                 put("total_requests", results.size)
                 put("payloads_count", payloads.size)
-                put("mode", when {
-                    hasFuzzKeyword && !hasMarkerPairs -> "fuzz_keyword"
-                    hasMarkerPairs -> "marker_pairs"
-                    else -> "offset"
-                })
+                put("mode", plan.mode)
                 put("results", buildJsonArray { results.forEach { add(it) } })
             }
         } catch (e: Exception) {

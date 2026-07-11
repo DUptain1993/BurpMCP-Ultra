@@ -59,6 +59,12 @@ class ApiImportBridge(
             val resolvedBaseUrl = baseUrl ?: extractBaseUrl(spec, isOpenApi3)
                 ?: return buildJsonObject { put("error", "No base URL found in spec and none provided") }
 
+            // Validate the base URL BEFORE any scope/sitemap mutation: require a
+            // well-formed http(s) scheme and a syntactically valid host.
+            if (!validateBaseUrl(resolvedBaseUrl)) {
+                return buildJsonObject { put("error", "Invalid base URL: $resolvedBaseUrl") }
+            }
+
             // Parse the base URL
             val urlParts = parseUrl(resolvedBaseUrl)
             val host = urlParts["host"] ?: return buildJsonObject { put("error", "Invalid base URL: $resolvedBaseUrl") }
@@ -116,8 +122,10 @@ class ApiImportBridge(
                         }
                     }
 
-                    // Build the URL path with path parameters substituted
-                    var fullPath = basePath + path
+                    // Build the URL path with path parameters substituted.
+                    // Normalize the base-path/path boundary so a basePath of '/'
+                    // (or a servers[].url ending in '/') does not yield '//blog'.
+                    var fullPath = joinPaths(basePath, path)
                     for ((paramName, paramValue) in pathParams) {
                         fullPath = fullPath.replace("{$paramName}", paramValue)
                     }
@@ -222,6 +230,61 @@ class ApiImportBridge(
             }
         } catch (e: Exception) {
             buildJsonObject { put("error", "Failed to import OpenAPI spec: ${e.message}") }
+        }
+    }
+
+    companion object {
+        /**
+         * Join a base path and an endpoint path, collapsing the boundary slash so a
+         * basePath of "/" (or a servers[].url ending in "/") does not produce a
+         * double-slash path. An empty result maps to "/".
+         *
+         *   joinPaths("/",     "/blog") == "/blog"
+         *   joinPaths("/api",  "/blog") == "/api/blog"
+         *   joinPaths("/api/", "/blog") == "/api/blog"
+         *   joinPaths("/",     "/")     == "/"
+         *   joinPaths("",      "/blog") == "/blog"
+         *   joinPaths("/api",  "blog")  == "/api/blog"
+         */
+        internal fun joinPaths(basePath: String, path: String): String {
+            val bp = basePath.trimEnd('/')
+            val p = if (path.startsWith("/")) path else "/$path"
+            val joined = bp + p
+            return if (joined.isEmpty()) "/" else joined
+        }
+
+        /**
+         * Validate a resolved base URL before any scope/sitemap mutation. Requires an
+         * http/https scheme and a syntactically valid host (no spaces; must look like a
+         * hostname/IP or "localhost"). Returns false for malformed input rather than
+         * letting a bad host silently reach scope.
+         */
+        internal fun validateBaseUrl(url: String): Boolean {
+            val lower = url.lowercase()
+            if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false
+            val withoutScheme = url.removePrefix("https://").removePrefix("http://")
+            if (withoutScheme.isEmpty()) return false
+
+            val pathStart = withoutScheme.indexOf('/')
+            val hostPort = if (pathStart >= 0) withoutScheme.substring(0, pathStart) else withoutScheme
+            if (hostPort.isEmpty()) return false
+            if (hostPort.any { it.isWhitespace() }) return false
+
+            val host = if (hostPort.contains(':')) hostPort.substringBefore(':') else hostPort
+            val portPart = if (hostPort.contains(':')) hostPort.substringAfter(':') else null
+            if (host.isEmpty()) return false
+            if (portPart != null && (portPart.isEmpty() || portPart.toIntOrNull() == null)) return false
+
+            // Accept localhost, dotted hostnames/IPv4, or single-label hosts that
+            // contain only valid hostname characters. Reject anything with spaces
+            // or characters that can't appear in a host.
+            if (host == "localhost") return true
+            if (host.any { it.isWhitespace() }) return false
+            val hostRegex = Regex("^[A-Za-z0-9._-]+$")
+            if (!hostRegex.matches(host)) return false
+            // Require a dot (FQDN / IPv4) OR a purely-numeric single label is rejected;
+            // a bare single label like "notahost" without a dot is treated as invalid.
+            return host.contains('.')
         }
     }
 

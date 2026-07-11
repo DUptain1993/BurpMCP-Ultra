@@ -42,6 +42,15 @@ class ConfigBridge(private val api: MontoyaApi) {
         redirectPort: Int?,
         certificate: String?
     ): JsonObject {
+        // Parse & validate "host:port" up front so callers get a clear
+        // validation error rather than a confusing "unrecognized schema?".
+        val parsed = parseListenerInterface(listenerInterface)
+            ?: return buildJsonObject {
+                put("error", "Invalid interface '$listenerInterface'. Expected 'host:port' " +
+                    "with a port in 1-65535, e.g. '127.0.0.1:8081'.")
+            }
+        val (host, port) = parsed
+
         return try {
             val configJson = api.burpSuite().exportProjectOptionsAsJson("proxy.request_listeners")
             val config = Json.parseToJsonElement(configJson).jsonObject.toMutableMap()
@@ -51,21 +60,8 @@ class ConfigBridge(private val api: MontoyaApi) {
             val existingListeners = proxyObj["request_listeners"]
                 ?.jsonArray?.toMutableList() ?: mutableListOf()
 
-            // Build new listener entry
-            val newListener = buildJsonObject {
-                put("listener_interface", listenerInterface)
-                put("running", true)
-                put("certificate_mode", certificate ?: "per_host")
-                if (tls) {
-                    put("tls", true)
-                }
-                if (redirectHost != null) {
-                    put("redirect_host", redirectHost)
-                    put("redirect_port", redirectPort ?: 80)
-                    put("redirect_to_host", true)
-                    put("redirect_to_port", true)
-                }
-            }
+            // Build new listener entry using Burp's real request_listeners schema.
+            val newListener = buildProxyListener(host, port, tls, redirectHost, redirectPort, certificate)
 
             val expectedCount = existingListeners.size + 1
             existingListeners.add(newListener)
@@ -79,9 +75,7 @@ class ConfigBridge(private val api: MontoyaApi) {
             // keys, so confirm the listener was really added before reporting
             // success.
             val afterListeners = currentProxyListeners()
-            val present = afterListeners.any { listener ->
-                listener.jsonObject["listener_interface"]?.jsonPrimitive?.contentOrNull == listenerInterface
-            }
+            val present = afterListeners.any { listener -> listenerMatches(listener, host, port) }
             if (!present || afterListeners.size < expectedCount) {
                 return buildJsonObject {
                     put("status", "failed")
@@ -92,6 +86,7 @@ class ConfigBridge(private val api: MontoyaApi) {
             buildJsonObject {
                 put("status", "added")
                 put("interface", listenerInterface)
+                put("listener_port", port)
                 put("tls", tls)
                 put("total_listeners", afterListeners.size)
             }
@@ -106,6 +101,13 @@ class ConfigBridge(private val api: MontoyaApi) {
      * Removes a proxy listener matching the given interface string.
      */
     fun removeProxyListener(listenerInterface: String): JsonObject {
+        val parsed = parseListenerInterface(listenerInterface)
+            ?: return buildJsonObject {
+                put("error", "Invalid interface '$listenerInterface'. Expected 'host:port' " +
+                    "with a port in 1-65535, e.g. '127.0.0.1:8081'.")
+            }
+        val (host, port) = parsed
+
         return try {
             val configJson = api.burpSuite().exportProjectOptionsAsJson("proxy.request_listeners")
             val config = Json.parseToJsonElement(configJson).jsonObject.toMutableMap()
@@ -116,10 +118,7 @@ class ConfigBridge(private val api: MontoyaApi) {
                 ?.jsonArray?.toMutableList() ?: mutableListOf()
 
             val sizeBefore = existingListeners.size
-            existingListeners.removeAll { listener ->
-                val iface = listener.jsonObject["listener_interface"]?.jsonPrimitive?.contentOrNull
-                iface == listenerInterface
-            }
+            existingListeners.removeAll { listener -> listenerMatches(listener, host, port) }
 
             if (existingListeners.size == sizeBefore) {
                 return buildJsonObject {
@@ -136,9 +135,7 @@ class ConfigBridge(private val api: MontoyaApi) {
             // Read back the actual config and confirm the listener is gone;
             // Burp silently ignores unrecognized keys.
             val afterListeners = currentProxyListeners()
-            val stillPresent = afterListeners.any { listener ->
-                listener.jsonObject["listener_interface"]?.jsonPrimitive?.contentOrNull == listenerInterface
-            }
+            val stillPresent = afterListeners.any { listener -> listenerMatches(listener, host, port) }
             if (stillPresent) {
                 return buildJsonObject {
                     put("status", "failed")
@@ -177,14 +174,7 @@ class ConfigBridge(private val api: MontoyaApi) {
             val existingRules = proxyObj["match_replace_rules"]
                 ?.jsonArray?.toMutableList() ?: mutableListOf()
 
-            val newRule = buildJsonObject {
-                put("type", type)
-                put("match", match)
-                put("replace", replace)
-                put("comment", comment ?: "")
-                put("enabled", enabled)
-                put("is_regex", false)
-            }
+            val newRule = buildMatchReplaceRule(type, match, replace, comment, enabled)
 
             val expectedCount = existingRules.size + 1
             existingRules.add(newRule)
@@ -200,8 +190,8 @@ class ConfigBridge(private val api: MontoyaApi) {
             val afterRules = currentMatchReplaceRules()
             val present = afterRules.any { rule ->
                 val r = rule.jsonObject
-                r["match"]?.jsonPrimitive?.contentOrNull == match &&
-                    r["replace"]?.jsonPrimitive?.contentOrNull == replace
+                r["string_match"]?.jsonPrimitive?.contentOrNull == match &&
+                    r["string_replace"]?.jsonPrimitive?.contentOrNull == replace
             }
             if (!present || afterRules.size < expectedCount) {
                 return buildJsonObject {
@@ -318,24 +308,19 @@ class ConfigBridge(private val api: MontoyaApi) {
         destinationHost: String?
     ): JsonObject {
         return try {
+            // Burp requires the upstream proxy nested under
+            // project_options.connections.upstream_proxy — a flat
+            // {"upstream_proxy": ...} root is silently ignored.
+            val serverEntry = buildUpstreamServer(host, port, proxyType, authUser, authPass, destinationHost)
             val upstreamConfig = buildJsonObject {
-                put("upstream_proxy", buildJsonObject {
-                    putJsonArray("servers") {
-                        addJsonObject {
-                            put("proxy_host", host)
-                            put("proxy_port", port)
-                            put("proxy_type", proxyType.uppercase())
-                            put("destination_host", destinationHost ?: "*")
-                            put("enabled", true)
-                            if (authUser != null) {
-                                put("authentication", buildJsonObject {
-                                    put("enabled", true)
-                                    put("username", authUser)
-                                    put("password", authPass ?: "")
-                                })
+                put("project_options", buildJsonObject {
+                    put("connections", buildJsonObject {
+                        put("upstream_proxy", buildJsonObject {
+                            putJsonArray("servers") {
+                                add(serverEntry)
                             }
-                        }
-                    }
+                        })
+                    })
                 })
             }
 
@@ -415,5 +400,144 @@ class ConfigBridge(private val api: MontoyaApi) {
                 ?.get("connections")?.jsonObject
                 ?.get("upstream_proxy")?.jsonObject
         return upstream?.get("servers")?.jsonArray ?: JsonArray(emptyList())
+    }
+
+    // ---------------------------------------------------------------
+    // Pure schema builders / parsers (unit-testable without live Burp)
+    //
+    // These live in a companion object so they can be exercised directly by
+    // unit tests without constructing a ConfigBridge (which needs a live
+    // MontoyaApi). The instance methods above call them by their short names.
+    // ---------------------------------------------------------------
+
+    companion object {
+
+        /**
+         * Builds a match-and-replace rule using Burp's real project-config
+         * schema. Burp expects `rule_type`, `string_match`, `string_replace`,
+         * and `is_simple_match` (true = literal, false = regex) — NOT the
+         * invented `type`/`match`/`replace`/`is_regex` keys, which Burp
+         * silently drops (BUG #27).
+         */
+        internal fun buildMatchReplaceRule(
+            type: String,
+            match: String,
+            replace: String,
+            comment: String?,
+            enabled: Boolean
+        ): JsonObject = buildJsonObject {
+            put("rule_type", type)
+            put("string_match", match)
+            put("string_replace", replace)
+            put("comment", comment ?: "")
+            put("enabled", enabled)
+            // We accept plain text or regex; treat every rule as a regex match
+            // (is_simple_match = false) to preserve the previous is_regex=false
+            // behaviour, where the literal string is used as the regex pattern.
+            put("is_simple_match", false)
+        }
+
+        /**
+         * Parses a "host:port" interface string into (host, port). Returns null
+         * for malformed input (empty host, missing/invalid port, out-of-range
+         * port). IPv6 literals are not supported by Burp's simple interface
+         * field.
+         */
+        internal fun parseListenerInterface(iface: String): Pair<String, Int>? {
+            val trimmed = iface.trim()
+            val idx = trimmed.lastIndexOf(':')
+            if (idx <= 0 || idx == trimmed.length - 1) return null
+            val host = trimmed.substring(0, idx).trim()
+            val portStr = trimmed.substring(idx + 1).trim()
+            if (host.isEmpty()) return null
+            val port = portStr.toIntOrNull() ?: return null
+            if (port < 1 || port > 65535) return null
+            return host to port
+        }
+
+        /**
+         * Builds a proxy request listener entry using Burp's real
+         * `proxy.request_listeners` schema (`listener_port`, `listen_mode`,
+         * `bind_address`, ...) instead of the invented `listener_interface`
+         * key (BUG #28).
+         */
+        internal fun buildProxyListener(
+            host: String,
+            port: Int,
+            tls: Boolean,
+            redirectHost: String?,
+            redirectPort: Int?,
+            certificate: String?
+        ): JsonObject = buildJsonObject {
+            put("listener_port", port)
+            val loopback = host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
+            val allIfaces = host == "0.0.0.0" || host == "*" || host.isEmpty()
+            when {
+                loopback -> put("listen_mode", "loopback_only")
+                allIfaces -> put("listen_mode", "all_interfaces")
+                else -> {
+                    put("listen_mode", "specific_address")
+                    put("bind_address", host)
+                }
+            }
+            put("running", true)
+            put("certificate_mode", certificate ?: "per_host")
+            put("use_custom_tls_protocols", false)
+            put("enable_http2", true)
+            if (tls) {
+                // TLS termination for this listener — matches Burp's exported flag.
+                put("support_invisible_proxying", false)
+            }
+            if (redirectHost != null) {
+                // Burp models fixed redirection under the listener's
+                // invisible-proxy / redirect fields.
+                put("redirect_to_host", redirectHost)
+                put("redirect_to_port", redirectPort ?: 80)
+            }
+        }
+
+        /**
+         * True if the given exported listener JSON matches (host, port) using
+         * Burp's real schema (`listener_port` + `listen_mode`/`bind_address`).
+         */
+        internal fun listenerMatches(listener: JsonElement, host: String, port: Int): Boolean {
+            val obj = listener as? JsonObject ?: return false
+            val lport = obj["listener_port"]?.jsonPrimitive?.intOrNull ?: return false
+            if (lport != port) return false
+            val loopback = host == "127.0.0.1" || host.equals("localhost", ignoreCase = true)
+            val allIfaces = host == "0.0.0.0" || host == "*" || host.isEmpty()
+            val mode = obj["listen_mode"]?.jsonPrimitive?.contentOrNull
+            return when {
+                loopback -> mode == null || mode == "loopback_only"
+                allIfaces -> mode == null || mode == "all_interfaces"
+                else -> obj["bind_address"]?.jsonPrimitive?.contentOrNull == host
+            }
+        }
+
+        /**
+         * Builds a single upstream proxy server entry. The caller nests this
+         * under project_options.connections.upstream_proxy.servers (BUG #29).
+         */
+        internal fun buildUpstreamServer(
+            host: String,
+            port: Int,
+            proxyType: String,
+            authUser: String?,
+            authPass: String?,
+            destinationHost: String?
+        ): JsonObject = buildJsonObject {
+            put("proxy_host", host)
+            put("proxy_port", port)
+            put("proxy_type", proxyType.uppercase())
+            put("destination_host", destinationHost ?: "*")
+            put("enabled", true)
+            if (authUser != null) {
+                put("authentication", buildJsonObject {
+                    put("enabled", true)
+                    put("username", authUser)
+                    put("password", authPass ?: "")
+                })
+            }
+        }
     }
 }

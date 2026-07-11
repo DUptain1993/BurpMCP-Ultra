@@ -2,6 +2,8 @@ package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
 import com.burpmcp.ultra.core.ProxyHistorySearch
+import com.burpmcp.ultra.core.StatusCodeRange
+import com.burpmcp.ultra.core.HighlightColorName
 import burp.api.montoya.core.Annotations
 import burp.api.montoya.core.HighlightColor
 import burp.api.montoya.http.message.MimeType
@@ -90,6 +92,15 @@ class ProxyBridge(
             null
         }
 
+        // Validate the status-code range ONCE, up front — a malformed range now
+        // returns a clear error instead of silently dropping the filter (which used
+        // to return items outside the caller's intended range).
+        val resolvedRange: StatusCodeRange.Range? = when (val r = StatusCodeRange.parse(statusCodeRange)) {
+            is StatusCodeRange.Result.None -> null
+            is StatusCodeRange.Result.Ok -> r.range
+            is StatusCodeRange.Result.Invalid -> return buildJsonObject { put("error", r.message) }
+        }
+
         val filter = ProxyHistoryFilter { item ->
             if (inScopeOnly && !item.request().isInScope()) return@ProxyHistoryFilter false
             if (host != null && !item.host().contains(host, ignoreCase = true)) return@ProxyHistoryFilter false
@@ -97,14 +108,9 @@ class ProxyBridge(
             if (statusCode != null && item.hasResponse()) {
                 if (item.response().statusCode().toInt() != statusCode) return@ProxyHistoryFilter false
             }
-            if (statusCodeRange != null && item.hasResponse()) {
-                val parts = statusCodeRange.split("-")
-                if (parts.size == 2) {
-                    val min = parts[0].trim().toIntOrNull() ?: 0
-                    val max = parts[1].trim().toIntOrNull() ?: 999
-                    val sc = item.response().statusCode().toInt()
-                    if (sc < min || sc > max) return@ProxyHistoryFilter false
-                }
+            if (resolvedRange != null && item.hasResponse()) {
+                val sc = item.response().statusCode().toInt()
+                if (!resolvedRange.contains(sc)) return@ProxyHistoryFilter false
             }
             if (resolvedMimeType != null && item.mimeType() != resolvedMimeType) {
                 return@ProxyHistoryFilter false
@@ -325,26 +331,36 @@ class ProxyBridge(
                 put("error", "History item with id $index not found")
             }
 
+        // Validate the highlight colour BEFORE mutating anything. Montoya's
+        // HighlightColor.highlightColor(name) returns NONE (not an exception) for an
+        // unknown colour, so trusting it used to CLEAR any existing highlight while
+        // still reporting annotated:true — a silent clear masquerading as success.
+        val canonicalHighlight: String? = if (highlight != null) {
+            HighlightColorName.canonical(highlight)
+                ?: return buildJsonObject {
+                    put(
+                        "error",
+                        "Invalid highlight color: '$highlight'. Valid values: ${HighlightColorName.validValues()}"
+                    )
+                }
+        } else {
+            null
+        }
+
         val annotations = item.annotations()
         if (comment != null) {
             annotations.setNotes(comment)
         }
-        if (highlight != null) {
-            val color = try {
-                HighlightColor.highlightColor(highlight)
-            } catch (_: Exception) {
-                try { HighlightColor.valueOf(highlight.uppercase()) } catch (_: Exception) { null }
-            }
-            if (color != null) {
-                annotations.setHighlightColor(color)
-            }
+        if (canonicalHighlight != null) {
+            // canonicalHighlight is a validated enum constant name, so valueOf is safe.
+            annotations.setHighlightColor(HighlightColor.valueOf(canonicalHighlight))
         }
 
         return buildJsonObject {
             put("index", index)
             put("annotated", true)
             if (comment != null) put("comment", comment)
-            if (highlight != null) put("highlight", highlight)
+            if (canonicalHighlight != null) put("highlight", canonicalHighlight)
         }
     }
 
@@ -871,6 +887,12 @@ class ProxyBridge(
             "application/yaml", "text/yaml", "yaml", "yml" -> MimeType.YAML
             "text/event-stream", "sse" -> MimeType.SSE
             "application/rtf", "text/rtf", "rtf" -> MimeType.RTF
+            "image/svg+xml", "svg" -> MimeType.IMAGE_SVG_XML
+            "image/png", "png" -> MimeType.IMAGE_PNG
+            "image/jpeg", "image/jpg", "jpeg", "jpg" -> MimeType.IMAGE_JPEG
+            "image/gif", "gif" -> MimeType.IMAGE_GIF
+            "image/bmp", "bmp" -> MimeType.IMAGE_BMP
+            "image/tiff", "tiff", "tif" -> MimeType.IMAGE_TIFF
             else -> null
         }
     }
@@ -880,7 +902,9 @@ class ProxyBridge(
      */
     private fun mimeTypeValidValues(): String {
         val constants = MimeType.values().joinToString(", ") { it.name }
-        return "$constants (also accepts common aliases such as application/json, text/html, text/plain, application/javascript, application/xml)"
+        return "$constants (also accepts common aliases such as application/json, text/html, " +
+            "text/plain, application/javascript, application/xml, and image content-types like " +
+            "image/png, image/jpeg, image/gif, image/svg+xml)"
     }
 
     /**

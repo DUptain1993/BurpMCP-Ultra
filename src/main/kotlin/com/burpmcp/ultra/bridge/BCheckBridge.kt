@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.core.EnumValidation
 import com.burpmcp.ultra.state.StateManager
 import kotlinx.serialization.json.*
 import java.time.Instant
@@ -33,7 +34,7 @@ class BCheckBridge(
         // Match conditions (for passive checks)
         matchPattern: String?,      // Regex pattern to match
         matchLocation: String?,     // response_body, response_headers, request_body, request_headers, status_code
-        matchCondition: String?,    // "matches" or "contains" or "is"
+        matchCondition: String?,    // "matches", "contains", or "is"
         // Active check params
         payloads: List<String>?,           // Payloads to inject (for insertion_point type)
         responseMatchPattern: String?,     // What to look for in the response after injection
@@ -45,6 +46,23 @@ class BCheckBridge(
         issueDetail: String?,
         issueRemediation: String?
     ): JsonObject {
+        // Validate all closed-set parameters BEFORE emitting or importing any DSL.
+        // A bad enum here must return a clean structured error, never a deployed check.
+        validateInputs(type, severity, confidence, matchCondition)?.let { return it }
+
+        // Active checks need something to look for in the response; a `matches ""`
+        // condition would fire on every response, so require a non-empty match here.
+        if (type.trim().lowercase() == "insertion_point") {
+            val respMatch = (responseMatchPattern ?: matchPattern)?.trim()
+            if (respMatch.isNullOrEmpty()) {
+                return buildJsonObject {
+                    put("error", "insertion_point checks require a non-empty response_match_pattern " +
+                        "(or match_pattern) so the check has something to detect in the response. " +
+                        "Emitting an empty match would fire on every response.")
+                }
+            }
+        }
+
         // Generate the BCheck script
         val script = generateScript(
             name, description, author ?: "BurpMCP-Ultra AI Agent", tags ?: "ai-generated",
@@ -447,6 +465,8 @@ given host then
 
     /**
      * Generate a BCheck script from structured parameters.
+     * Delegates to the pure static [emitScript] so the DSL output can be
+     * unit-tested without a live Burp/Montoya instance.
      */
     private fun generateScript(
         name: String,
@@ -464,84 +484,96 @@ given host then
         confidence: String,
         issueDetail: String?,
         issueRemediation: String?
-    ): String {
-        val sb = StringBuilder()
+    ): String = emitScript(
+        name, description, author, tags, type,
+        matchPattern, matchLocation, matchCondition,
+        payloads, responseMatchPattern, collaboratorPayloadType,
+        severity, confidence, issueDetail, issueRemediation
+    )
 
-        // Metadata
-        sb.appendLine("metadata:")
-        sb.appendLine("    language: v2-beta")
-        sb.appendLine("    name: \"$name\"")
-        sb.appendLine("    description: \"$description\"")
-        sb.appendLine("    author: \"$author\"")
-        sb.appendLine("    tags: ${tags.split(",").joinToString(", ") { "\"${it.trim()}\"" }}")
-        sb.appendLine()
+    fun getDeployedChecks(): List<DeployedBCheck> = deployedChecks.toList()
 
-        val detail = issueDetail ?: "$name was detected."
-        val remediation = issueRemediation ?: "Review and fix the identified issue."
+    companion object {
+        // Closed sets accepted by the v2-beta BCheck DSL. Anything outside these
+        // sets must be rejected up front — an unknown value silently emitted into
+        // the generated DSL either fails to import or (worse, for `type`) produces
+        // a degenerate `matches ""` check that fires on every response.
+        internal val ALLOWED_SEVERITIES = setOf("high", "medium", "low", "information")
+        internal val ALLOWED_CONFIDENCES = setOf("certain", "firm", "tentative")
+        internal val ALLOWED_TYPES = setOf(
+            "passive_response", "passive_request", "insertion_point",
+            "host_level", "path_level", "collaborator"
+        )
+        // The grammar only supports `matches` and `is`. `contains` is advertised by
+        // the tool schema as a convenience and is translated to an escaped-substring
+        // `matches` regex — see [normalizeCondition].
+        internal val ALLOWED_CONDITIONS = setOf("matches", "is", "contains")
 
-        when (type.lowercase()) {
-            "passive_response" -> {
-                sb.appendLine("given response then")
-                val location = when (matchLocation?.lowercase()) {
-                    "response_headers", "headers" -> "{latest.response.headers}"
-                    "status_code" -> "{latest.response.status_code}"
-                    else -> "{latest.response.body}"
-                }
-                val condition = matchCondition ?: "matches"
-                sb.appendLine("    if $location $condition \"${escapeRegex(matchPattern ?: "")}\" then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
-            }
+        /**
+         * Validate every closed-set parameter that feeds the DSL emitter. Returns a
+         * clean `{"error": ...}` object on the first bad value, or null when all pass.
+         * Kept pure/static so it can be unit-tested without a live Burp instance.
+         */
+        fun validateInputs(
+            type: String,
+            severity: String,
+            confidence: String,
+            matchCondition: String?
+        ): JsonObject? {
+            EnumValidation.error(type, ALLOWED_TYPES, "type", required = true)?.let { return it }
+            EnumValidation.error(severity, ALLOWED_SEVERITIES, "severity", required = true)?.let { return it }
+            EnumValidation.error(confidence, ALLOWED_CONFIDENCES, "confidence", required = true)?.let { return it }
+            // matchCondition is optional (defaults to "matches"); only validate when supplied.
+            EnumValidation.error(matchCondition, ALLOWED_CONDITIONS, "match_condition", required = false)?.let { return it }
+            return null
+        }
 
-            "passive_request" -> {
-                sb.appendLine("given request then")
-                val location = when (matchLocation?.lowercase()) {
-                    "request_headers", "headers" -> "{base.request.headers}"
-                    "request_body", "body" -> "{base.request.body}"
-                    else -> "{base.request.url}"
-                }
-                val condition = matchCondition ?: "matches"
-                sb.appendLine("    if $location $condition \"${escapeRegex(matchPattern ?: "")}\" then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
-            }
+        /**
+         * Pure BCheck v2-beta DSL emitter. No Burp/Montoya dependency, so it can be
+         * unit-tested directly. Throws [IllegalArgumentException] on an unsupported
+         * [type] rather than emitting a degenerate always-firing check.
+         */
+        internal fun emitScript(
+            name: String,
+            description: String,
+            author: String,
+            tags: String,
+            type: String,
+            matchPattern: String?,
+            matchLocation: String?,
+            matchCondition: String?,
+            payloads: List<String>?,
+            responseMatchPattern: String?,
+            collaboratorPayloadType: String?,
+            severity: String,
+            confidence: String,
+            issueDetail: String?,
+            issueRemediation: String?
+        ): String {
+            val sb = StringBuilder()
 
-            "insertion_point" -> {
-                if (payloads != null && payloads.isNotEmpty()) {
-                    sb.appendLine("define:")
-                    sb.appendLine("    test_payloads = ${payloads.joinToString(", ") { "\"$it\"" }}")
-                    sb.appendLine()
-                    sb.appendLine("given insertion point then")
-                    sb.appendLine("    run for each:")
-                    sb.appendLine("        test_payloads as payload")
-                    sb.appendLine()
-                    sb.appendLine("    send payload called inject_test:")
-                    sb.appendLine("        replacing: `{payload}`")
-                    sb.appendLine()
-                    val respMatch = responseMatchPattern ?: matchPattern ?: ""
-                    sb.appendLine("    if {inject_test.response.body} matches \"${escapeRegex(respMatch)}\" then")
-                    sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
-                    sb.appendLine("            confidence: $confidence")
-                    sb.appendLine("            detail: `$detail Payload: {payload}`")
-                    sb.appendLine("            remediation: `$remediation`")
-                    sb.appendLine("    end if")
-                } else {
-                    // Single payload from matchPattern
-                    sb.appendLine("given insertion point then")
-                    sb.appendLine("    send payload called inject_test:")
-                    sb.appendLine("        replacing: `${matchPattern ?: "FUZZ"}`")
-                    sb.appendLine()
-                    val respMatch = responseMatchPattern ?: "error|exception|stack.trace"
-                    sb.appendLine("    if {inject_test.response.body} matches \"${escapeRegex(respMatch)}\" then")
+            // Metadata
+            sb.appendLine("metadata:")
+            sb.appendLine("    language: v2-beta")
+            sb.appendLine("    name: \"$name\"")
+            sb.appendLine("    description: \"$description\"")
+            sb.appendLine("    author: \"$author\"")
+            sb.appendLine("    tags: ${tags.split(",").joinToString(", ") { "\"${it.trim()}\"" }}")
+            sb.appendLine()
+
+            val detail = issueDetail ?: "$name was detected."
+            val remediation = issueRemediation ?: "Review and fix the identified issue."
+
+            when (type.trim().lowercase()) {
+                "passive_response" -> {
+                    sb.appendLine("given response then")
+                    val location = when (matchLocation?.lowercase()) {
+                        "response_headers", "headers" -> "{latest.response.headers}"
+                        "status_code" -> "{latest.response.status_code}"
+                        else -> "{latest.response.body}"
+                    }
+                    val (op, cond) = normalizeCondition(matchCondition, matchPattern ?: "")
+                    sb.appendLine("    if $location $op \"${escapeRegex(cond)}\" then")
                     sb.appendLine("        report issue:")
                     sb.appendLine("            severity: $severity")
                     sb.appendLine("            confidence: $confidence")
@@ -549,85 +581,167 @@ given host then
                     sb.appendLine("            remediation: `$remediation`")
                     sb.appendLine("    end if")
                 }
+
+                "passive_request" -> {
+                    sb.appendLine("given request then")
+                    val location = when (matchLocation?.lowercase()) {
+                        "request_headers", "headers" -> "{base.request.headers}"
+                        "request_body", "body" -> "{base.request.body}"
+                        else -> "{base.request.url}"
+                    }
+                    val (op, cond) = normalizeCondition(matchCondition, matchPattern ?: "")
+                    sb.appendLine("    if $location $op \"${escapeRegex(cond)}\" then")
+                    sb.appendLine("        report issue:")
+                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            confidence: $confidence")
+                    sb.appendLine("            detail: `$detail`")
+                    sb.appendLine("            remediation: `$remediation`")
+                    sb.appendLine("    end if")
+                }
+
+                "insertion_point" -> {
+                    // v2-beta does NOT support `run for each` over a define list under
+                    // `given insertion point then` with `send payload`. Emit one distinct
+                    // `send payload called p{n}` per payload, each with its own detection
+                    // block, which is the documented insertion-point pattern.
+                    //
+                    // create() guarantees a non-empty response_match_pattern/match_pattern
+                    // for this type, so `matches ""` can never be emitted; we still fall
+                    // back defensively here in case emitScript is reached another way.
+                    val respMatch = (responseMatchPattern ?: matchPattern)
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "error|exception|stack.trace"
+                    val payloadList = payloads?.filter { it.isNotEmpty() }
+                        ?.takeIf { it.isNotEmpty() }
+                        ?: listOf(matchPattern?.takeIf { it.isNotBlank() } ?: "FUZZ")
+
+                    sb.appendLine("given insertion point then")
+                    payloadList.forEachIndexed { index, payload ->
+                        val varName = "p${index + 1}"
+                        sb.appendLine("    send payload called $varName:")
+                        sb.appendLine("        replacing: `$payload`")
+                        sb.appendLine()
+                        sb.appendLine("    if {$varName.response.body} matches \"${escapeRegex(respMatch)}\" then")
+                        sb.appendLine("        report issue:")
+                        sb.appendLine("            severity: $severity")
+                        sb.appendLine("            confidence: $confidence")
+                        sb.appendLine("            detail: `$detail Payload: $payload`")
+                        sb.appendLine("            remediation: `$remediation`")
+                        sb.appendLine("    end if")
+                        if (index < payloadList.lastIndex) sb.appendLine()
+                    }
+                }
+
+                "host_level" -> {
+                    sb.appendLine("given host then")
+                    sb.appendLine("    send request called host_check:")
+                    sb.appendLine("        method: \"GET\"")
+                    sb.appendLine("        path: \"${matchPattern ?: "/"}\"")
+                    sb.appendLine()
+                    val respMatch = responseMatchPattern ?: matchPattern ?: ""
+                    val (op, cond) = normalizeCondition(matchCondition, respMatch)
+                    sb.appendLine("    if {host_check.response.status_code} is \"200\" and")
+                    sb.appendLine("        {host_check.response.body} $op \"${escapeRegex(cond)}\" then")
+                    sb.appendLine("        report issue:")
+                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            confidence: $confidence")
+                    sb.appendLine("            detail: `$detail`")
+                    sb.appendLine("            remediation: `$remediation`")
+                    sb.appendLine("    end if")
+                }
+
+                "path_level" -> {
+                    val extensions = (payloads?.filter { it.isNotEmpty() }?.takeIf { it.isNotEmpty() })
+                        ?: listOf(".bak", ".old", ".orig", ".swp", "~")
+                    sb.appendLine("define:")
+                    // Each list value must be a valid quoted string; escape embedded quotes
+                    // so one stray `"` can't terminate the list and corrupt the grammar.
+                    sb.appendLine("    test_extensions = ${extensions.joinToString(", ") { "\"${escapeRegex(it)}\"" }}")
+                    sb.appendLine()
+                    sb.appendLine("given path then")
+                    sb.appendLine("    run for each:")
+                    sb.appendLine("        test_extensions as ext")
+                    sb.appendLine()
+                    sb.appendLine("    send request called path_check:")
+                    sb.appendLine("        method: \"GET\"")
+                    sb.appendLine("        path: `{base.request.url.path}{ext}`")
+                    sb.appendLine()
+                    sb.appendLine("    if {path_check.response.status_code} is \"200\" then")
+                    sb.appendLine("        report issue:")
+                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            confidence: $confidence")
+                    sb.appendLine("            detail: `$detail Found at: {path_check.request.url}`")
+                    sb.appendLine("            remediation: `$remediation`")
+                    sb.appendLine("    end if")
+                }
+
+                "collaborator" -> {
+                    sb.appendLine("given request then")
+                    val headerName = matchLocation ?: "Referer"
+                    sb.appendLine("    send request called collab_test:")
+                    sb.appendLine("        method: `{base.request.method}`")
+                    sb.appendLine("        replacing header \"$headerName\": `${matchPattern ?: "https://{generate_collaborator_address()}"}`")
+                    sb.appendLine()
+                    val interactionType = if (collaboratorPayloadType?.trim()?.lowercase() == "http") "http" else "dns"
+                    sb.appendLine("    if $interactionType interactions then")
+                    sb.appendLine("        report issue:")
+                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            confidence: $confidence")
+                    sb.appendLine("            detail: `$detail`")
+                    sb.appendLine("            remediation: `$remediation`")
+                    sb.appendLine("    end if")
+                }
+
+                else -> {
+                    // An unknown type must be rejected, never silently turned into a
+                    // `matches ""` passive check that fires on every response. create()
+                    // validates the type up front via validateInputs(); this guard makes
+                    // emitScript() safe even if reached by another path.
+                    throw IllegalArgumentException(
+                        "Unsupported BCheck type '$type'. Allowed: ${ALLOWED_TYPES.sorted().joinToString(", ")}"
+                    )
+                }
             }
 
-            "host_level" -> {
-                sb.appendLine("given host then")
-                sb.appendLine("    send request called host_check:")
-                sb.appendLine("        method: \"GET\"")
-                sb.appendLine("        path: \"${matchPattern ?: "/"}\"")
-                sb.appendLine()
-                val respMatch = responseMatchPattern ?: matchPattern ?: ""
-                val condition = matchCondition ?: "matches"
-                sb.appendLine("    if {host_check.response.status_code} is \"200\" and")
-                sb.appendLine("        {host_check.response.body} $condition \"${escapeRegex(respMatch)}\" then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
-            }
+            return sb.toString()
+        }
 
-            "path_level" -> {
-                val extensions = payloads ?: listOf(".bak", ".old", ".orig", ".swp", "~")
-                sb.appendLine("define:")
-                sb.appendLine("    test_extensions = ${extensions.joinToString(", ") { "\"$it\"" }}")
-                sb.appendLine()
-                sb.appendLine("given path then")
-                sb.appendLine("    run for each:")
-                sb.appendLine("        test_extensions as ext")
-                sb.appendLine()
-                sb.appendLine("    send request called path_check:")
-                sb.appendLine("        method: \"GET\"")
-                sb.appendLine("        path: `{base.request.url.path}{ext}`")
-                sb.appendLine()
-                sb.appendLine("    if {path_check.response.status_code} is \"200\" then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail Found at: {path_check.request.url}`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
-            }
+        private fun escapeRegex(pattern: String): String {
+            // BCheck uses its own regex dialect - don't double-escape.
+            // We only neutralise the double-quote so it can't terminate the
+            // enclosing "..." string literal in the emitted DSL.
+            return pattern.replace("\"", "\\\"")
+        }
 
-            "collaborator" -> {
-                sb.appendLine("given request then")
-                val headerName = matchLocation ?: "Referer"
-                sb.appendLine("    send request called collab_test:")
-                sb.appendLine("        method: `{base.request.method}`")
-                sb.appendLine("        replacing header \"$headerName\": `${matchPattern ?: "https://{generate_collaborator_address()}"}`")
-                sb.appendLine()
-                val interactionType = collaboratorPayloadType ?: "dns"
-                sb.appendLine("    if $interactionType interactions then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
-            }
-
-            else -> {
-                // Default to passive response
-                sb.appendLine("given response then")
-                sb.appendLine("    if {latest.response.body} matches \"${escapeRegex(matchPattern ?: "")}\" then")
-                sb.appendLine("        report issue:")
-                sb.appendLine("            severity: $severity")
-                sb.appendLine("            confidence: $confidence")
-                sb.appendLine("            detail: `$detail`")
-                sb.appendLine("            remediation: `$remediation`")
-                sb.appendLine("    end if")
+        /**
+         * The v2-beta grammar only supports the operators `matches` (regex) and `is`
+         * (exact string equality). The tool schema also advertises `contains`, which
+         * the grammar has no direct operator for — translate it to a `matches` over the
+         * regex-escaped substring so the emitted DSL is always valid.
+         *
+         * Returns the operator to emit and the (already regex-safe) pattern to compare
+         * against. `matches`/`is` pass the pattern through unchanged; `contains` escapes
+         * every regex metacharacter in the pattern so it is treated as a literal.
+         */
+        internal fun normalizeCondition(condition: String?, pattern: String): Pair<String, String> {
+            return when (condition?.trim()?.lowercase()) {
+                "is" -> "is" to pattern
+                "contains" -> "matches" to regexEscapeLiteral(pattern)
+                else -> "matches" to pattern // default and explicit "matches"
             }
         }
 
-        return sb.toString()
+        /**
+         * Escape every regex metacharacter so [literal] is matched verbatim inside a
+         * `matches` regex. Used to implement the `contains` convenience operator.
+         */
+        internal fun regexEscapeLiteral(literal: String): String {
+            val sb = StringBuilder(literal.length + 8)
+            for (c in literal) {
+                if (c in "\\.^$|?*+()[]{}") sb.append('\\')
+                sb.append(c)
+            }
+            return sb.toString()
+        }
     }
-
-    private fun escapeRegex(pattern: String): String {
-        // BCheck uses its own regex dialect - don't double-escape
-        return pattern.replace("\"", "\\\"")
-    }
-
-    fun getDeployedChecks(): List<DeployedBCheck> = deployedChecks.toList()
 }

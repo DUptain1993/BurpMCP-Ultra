@@ -42,6 +42,37 @@ class GraphQlTest {
     }
 
     @Test
+    fun `summarize handles null mutation and subscription root types`() {
+        // Rick and Morty / Countries shape: introspection enabled but no mutation/subscription root.
+        val intro = obj(
+            """{"data":{"__schema":{
+               "queryType":{"name":"Query"},
+               "mutationType":null,
+               "subscriptionType":null,
+               "types":[
+                 {"name":"Query","fields":[{"name":"characters"},{"name":"episodes"}]}
+               ]}}}"""
+        )
+        val s = GraphQl.summarize(intro)
+        assertTrue(s["introspection_enabled"]!!.jsonPrimitive.boolean)
+        assertEquals("Query", s["query_type"]?.jsonPrimitive?.contentOrNull)
+        // Null mutation root must not crash and must yield no fields.
+        assertTrue(s["mutation_type"] is kotlinx.serialization.json.JsonNull)
+        assertTrue(s["mutation_fields"]!!.jsonArray.isEmpty())
+        // Absent subscription is omitted from the summary entirely.
+        assertFalse("subscription_type" in s)
+        val qf = s["query_fields"]!!.jsonArray.map { it.jsonPrimitive.content }
+        assertTrue("characters" in qf && "episodes" in qf)
+    }
+
+    @Test
+    fun `summarize treats error-only response as introspection disabled`() {
+        // Some endpoints return {"data":null,"errors":[...]}; data=null must not crash.
+        val s = GraphQl.summarize(obj("""{"data":null,"errors":[{"message":"nope"}]}"""))
+        assertFalse(s["introspection_enabled"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
     fun `extractSuggestions pulls did-you-mean field names`() {
         val msg = """Cannot query field "usr" on type "Query". Did you mean "users" or "user"?"""
         assertEquals(listOf("users", "user"), GraphQl.extractSuggestions(msg))

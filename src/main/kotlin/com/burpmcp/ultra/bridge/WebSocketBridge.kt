@@ -13,6 +13,8 @@ import burp.api.montoya.websocket.WebSocketCreated
 import burp.api.montoya.websocket.WebSocketCreatedHandler
 import burp.api.montoya.websocket.Direction
 import burp.api.montoya.websocket.extension.ExtensionWebSocket
+import burp.api.montoya.websocket.extension.ExtensionWebSocketCreation
+import burp.api.montoya.websocket.extension.ExtensionWebSocketCreationStatus
 import burp.api.montoya.websocket.extension.ExtensionWebSocketMessageHandler
 import com.burpmcp.ultra.events.EventBus
 import com.burpmcp.ultra.state.StateManager
@@ -22,7 +24,10 @@ import com.burpmcp.ultra.state.WebSocketMessage
 import kotlinx.serialization.json.*
 import java.time.Instant
 import java.util.Base64
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicLong
 
 class WebSocketBridge(
@@ -54,6 +59,11 @@ class WebSocketBridge(
         // Parse URL to extract host, port, and path
         val parsedUrl = java.net.URI(url)
         val scheme = parsedUrl.scheme ?: "wss"
+
+        // Reject obviously non-WebSocket schemes before attempting an upgrade so
+        // callers get a clear message instead of a generic connection failure.
+        validateScheme(scheme)?.let { return buildErrorJson(it) }
+
         val host = parsedUrl.host ?: return buildErrorJson("Invalid URL: missing host")
         val useTls = scheme == "wss" || scheme == "https"
         val defaultPort = if (useTls) 443 else 80
@@ -83,11 +93,41 @@ class WebSocketBridge(
 
         val httpRequest = HttpRequest.httpRequest(httpService, requestBuilder.toString())
 
-        // Create the WebSocket connection through Montoya API
-        val creation = api.websockets().createWebSocket(httpRequest)
+        // Create the WebSocket connection through the Montoya API. The call is
+        // blocking and can hang indefinitely when a host accepts the TCP
+        // connection but never completes the upgrade (common with plaintext
+        // ws:// against a TLS port, or a silently-dropping middlebox). Bound it
+        // on a worker thread so the tool call always returns promptly; the
+        // underlying blocking read may still be leaked by Montoya, but the tool
+        // itself must not wedge.
+        val creation: ExtensionWebSocketCreation = try {
+            CompletableFuture
+                .supplyAsync { api.websockets().createWebSocket(httpRequest) }
+                .get(CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            return buildErrorJson(
+                "WebSocket upgrade timed out after $CONNECT_TIMEOUT_MS ms " +
+                    "(host accepted the connection but did not complete the upgrade)"
+            )
+        } catch (e: Exception) {
+            val cause = e.cause ?: e
+            return buildErrorJson("WebSocket creation failed: ${cause.message ?: cause.javaClass.simpleName}")
+        }
+
         val webSocketOpt = creation.webSocket()
         if (!webSocketOpt.isPresent) {
-            return buildErrorJson("Failed to create WebSocket connection: creation returned no socket")
+            // Surface the real failure reason from the creation status rather
+            // than a single generic message, so scheme/port mismatches are
+            // distinguishable from DNS and connection failures.
+            val status = creation.status()
+            val upgradeResponseOpt = creation.upgradeResponse()
+            val upgradeStatusCode: Int? =
+                if (upgradeResponseOpt.isPresent) upgradeResponseOpt.get().statusCode().toInt() else null
+            return buildJsonObject {
+                put("error", describeCreationStatus(status, upgradeStatusCode))
+                put("status", status?.name ?: "UNKNOWN")
+                if (upgradeStatusCode != null) put("upgrade_status_code", upgradeStatusCode)
+            }
         }
         val webSocket = webSocketOpt.get()
 
@@ -135,15 +175,24 @@ class WebSocketBridge(
      * @return JSON object confirming the message was sent.
      */
     fun sendText(connectionId: String, message: String): JsonObject {
-        val webSocket = webSocketHandles[connectionId]
+        // Consult the connection record first: it is the source of truth for
+        // what websocket_list advertises. Looking up the live handle first
+        // reports a misleading "Connection not found" for listed-but-closed
+        // connections.
+        val connection = stateManager.websocketConnections[connectionId]
             ?: return buildErrorJson("Connection not found: $connectionId")
 
-        val connection = stateManager.websocketConnections[connectionId]
-            ?: return buildErrorJson("Connection state not found: $connectionId")
-
         if (connection.status != "connected") {
-            return buildErrorJson("Connection is not active: status=${connection.status}")
+            return buildJsonObject {
+                put("error", "Connection is not active: status=${connection.status}")
+                put("status", connection.status)
+            }
         }
+
+        // Only a genuinely-connected record should still hold a live handle; if
+        // it is gone the socket was closed out from under us.
+        val webSocket = webSocketHandles[connectionId]
+            ?: return buildErrorJson("Connection handle unavailable (connection may be closed): $connectionId")
 
         webSocket.sendTextMessage(message)
 
@@ -188,15 +237,20 @@ class WebSocketBridge(
      * @return JSON object confirming the message was sent.
      */
     fun sendBinary(connectionId: String, data: String): JsonObject {
-        val webSocket = webSocketHandles[connectionId]
+        // State-record first (see sendText): reserves "Connection not found" for
+        // ids that are genuinely absent from websocket_list.
+        val connection = stateManager.websocketConnections[connectionId]
             ?: return buildErrorJson("Connection not found: $connectionId")
 
-        val connection = stateManager.websocketConnections[connectionId]
-            ?: return buildErrorJson("Connection state not found: $connectionId")
-
         if (connection.status != "connected") {
-            return buildErrorJson("Connection is not active: status=${connection.status}")
+            return buildJsonObject {
+                put("error", "Connection is not active: status=${connection.status}")
+                put("status", connection.status)
+            }
         }
+
+        val webSocket = webSocketHandles[connectionId]
+            ?: return buildErrorJson("Connection handle unavailable (connection may be closed): $connectionId")
 
         val decodedBytes = Base64.getDecoder().decode(data)
         webSocket.sendBinaryMessage(BurpByteArray.byteArray(*decodedBytes))
@@ -241,13 +295,26 @@ class WebSocketBridge(
      * @return JSON object confirming the closure.
      */
     fun close(connectionId: String): JsonObject {
-        val webSocket = webSocketHandles.remove(connectionId)
+        // State-first lookup so every list-visible id is actionable. The only
+        // true "not found" case is an id that is absent from the connection map.
+        val connection = stateManager.websocketConnections[connectionId]
             ?: return buildErrorJson("Connection not found: $connectionId")
 
-        val connection = stateManager.websocketConnections[connectionId]
-            ?: return buildErrorJson("Connection state not found: $connectionId")
+        // Already closed (e.g. a proxy-observed connection the peer shut down):
+        // report an idempotent no-op instead of a misleading error.
+        if (connection.status == "closed") {
+            return buildJsonObject {
+                put("connection_id", connectionId)
+                put("status", "already_closed")
+                put("messages_sent", connection.messagesSent.get())
+                put("messages_received", connection.messagesReceived.get())
+            }
+        }
 
-        webSocket.close()
+        // Only extension-created connections have a live handle we can drive.
+        // Proxy-observed / shadow entries have none; that is not an error — we
+        // simply mark the tracked state as closed.
+        webSocketHandles.remove(connectionId)?.close()
         connection.status = "closed"
         messageIndexCounters.remove(connectionId)
 
@@ -309,6 +376,14 @@ class WebSocketBridge(
         sinceIndex: Long,
         maxResults: Int
     ): JsonObject {
+        // Validate direction against the known enum so an unrecognised value
+        // yields a clear error instead of silently matching nothing.
+        validateDirectionFilter(direction)?.let { return buildErrorJson(it) }
+
+        // Validate max_results: a negative value would make List.take() throw an
+        // IllegalArgumentException that leaks as an opaque stdlib error.
+        validateMaxResults(maxResults)?.let { return buildErrorJson(it) }
+
         val connection = stateManager.websocketConnections[connectionId]
             ?: return buildErrorJson("Connection not found: $connectionId")
 
@@ -835,11 +910,95 @@ class WebSocketBridge(
     }
 
     /**
+     * Maps a Montoya [ExtensionWebSocketCreationStatus] to a human-readable
+     * failure reason. Delegates to the pure, enum-name-keyed
+     * [describeCreationStatus] so the mapping is unit-testable without the
+     * compileOnly Montoya API.
+     */
+    private fun describeCreationStatus(
+        status: ExtensionWebSocketCreationStatus?,
+        upgradeStatusCode: Int?
+    ): String = describeCreationStatus(status?.name, upgradeStatusCode)
+
+    /**
      * Builds a standardized error JSON object.
      */
     private fun buildErrorJson(message: String): JsonObject {
         return buildJsonObject {
             put("error", message)
+        }
+    }
+
+    companion object {
+        /**
+         * Upper bound on how long the blocking [MontoyaApi] createWebSocket call
+         * may take before the tool call returns a timeout error. A
+         * non-responsive host must fail fast instead of hanging forever.
+         */
+        const val CONNECT_TIMEOUT_MS = 12_000L
+
+        /** Schemes accepted for a WebSocket upgrade attempt. */
+        private val ALLOWED_SCHEMES = setOf("ws", "wss", "http", "https")
+
+        /** Recognised direction filters for [getMessages]. */
+        private val VALID_DIRECTIONS = setOf("client_to_server", "server_to_client")
+
+        /**
+         * Returns an error message if [scheme] is not a WebSocket-capable
+         * scheme, or null if it is acceptable. Comparison is case-insensitive.
+         */
+        internal fun validateScheme(scheme: String?): String? {
+            val normalized = scheme?.lowercase()
+            if (normalized == null || normalized !in ALLOWED_SCHEMES) {
+                return "Unsupported scheme '${scheme ?: ""}': expected ws, wss, http, or https"
+            }
+            return null
+        }
+
+        /**
+         * Returns an error message if [direction] is a non-null value that is
+         * not a recognised direction filter, or null if it is acceptable (null
+         * means "no filter").
+         */
+        internal fun validateDirectionFilter(direction: String?): String? {
+            if (direction != null && direction !in VALID_DIRECTIONS) {
+                return "Invalid direction: '$direction'. Must be 'client_to_server' or 'server_to_client'"
+            }
+            return null
+        }
+
+        /**
+         * Returns an error message if [maxResults] is negative (which would make
+         * List.take() throw), or null if it is acceptable. Zero is allowed and
+         * yields an empty result.
+         */
+        internal fun validateMaxResults(maxResults: Int): String? {
+            if (maxResults < 0) {
+                return "Invalid max_results: $maxResults. Must be zero or a positive integer"
+            }
+            return null
+        }
+
+        /**
+         * Pure mapping from an [ExtensionWebSocketCreationStatus] enum name to a
+         * specific, human-readable failure reason. Keyed by name (not the enum
+         * type) so it is testable without the compileOnly Montoya API.
+         */
+        internal fun describeCreationStatus(statusName: String?, upgradeStatusCode: Int?): String {
+            val base = when (statusName) {
+                "UNKNOWN_HOST" -> "DNS resolution failed (unknown host)"
+                "INVALID_HOST" -> "Invalid host in the upgrade request"
+                "INVALID_PORT" -> "Invalid port in the upgrade request"
+                "INVALID_REQUEST" -> "The upgrade request was rejected as invalid"
+                "CONNECTION_FAILED" -> "Connection failed (could not reach the host)"
+                "NON_UPGRADE_RESPONSE" ->
+                    "Server did not accept the WebSocket upgrade (possible scheme/port mismatch)"
+                "STREAMING_RESPONSE" ->
+                    "Server returned a streaming response instead of a WebSocket upgrade"
+                null -> "Failed to create WebSocket connection: no status reported"
+                else -> "Failed to create WebSocket connection (status=$statusName)"
+            }
+            return if (upgradeStatusCode != null) "$base [upgrade HTTP $upgradeStatusCode]" else base
         }
     }
 }

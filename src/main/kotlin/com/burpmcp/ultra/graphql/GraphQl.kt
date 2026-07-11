@@ -6,8 +6,6 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
@@ -28,19 +26,27 @@ object GraphQl {
 
     /** Summarizes an introspection response (`{data:{__schema:...}}`) into root types + field names. */
     fun summarize(json: JsonObject): JsonObject {
-        val schema = json["data"]?.jsonObject?.get("__schema")?.jsonObject
+        // `as? JsonObject` returns null for JsonNull (and any non-object), so error-only or
+        // null-valued responses short-circuit cleanly instead of crashing on `.jsonObject`.
+        val schema = (json["data"] as? JsonObject)?.get("__schema") as? JsonObject
             ?: return buildJsonObject { put("introspection_enabled", false) }
 
-        val types = schema["types"]?.jsonArray ?: JsonArray(emptyList())
+        val types = (schema["types"] as? JsonArray) ?: JsonArray(emptyList())
         fun fieldsOf(typeName: String?): List<String> {
             if (typeName == null) return emptyList()
-            val t = types.firstOrNull { it.jsonObject["name"]?.jsonPrimitive?.contentOrNull == typeName }?.jsonObject
-            return t?.get("fields")?.jsonArray?.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.contentOrNull } ?: emptyList()
+            val t = types.firstOrNull {
+                (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull == typeName
+            } as? JsonObject
+            return (t?.get("fields") as? JsonArray)
+                ?.mapNotNull { (it as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull }
+                ?: emptyList()
         }
 
-        val queryType = schema["queryType"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
-        val mutationType = schema["mutationType"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
-        val subscriptionType = schema["subscriptionType"]?.jsonObject?.get("name")?.jsonPrimitive?.contentOrNull
+        // Root types may legitimately be JSON null (schemas without a mutation/subscription root,
+        // e.g. Rick and Morty / Countries). `as? JsonObject` filters JsonNull safely.
+        val queryType = (schema["queryType"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+        val mutationType = (schema["mutationType"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
+        val subscriptionType = (schema["subscriptionType"] as? JsonObject)?.get("name")?.jsonPrimitive?.contentOrNull
 
         return buildJsonObject {
             put("introspection_enabled", true)

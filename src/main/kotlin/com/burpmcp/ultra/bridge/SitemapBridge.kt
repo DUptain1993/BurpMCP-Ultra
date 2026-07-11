@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import burp.api.montoya.core.ByteArray as BurpByteArray
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.http.HttpService
@@ -121,7 +122,9 @@ class SitemapBridge(private val api: MontoyaApi) {
         useTls: Boolean
     ): JsonObject {
         val httpService = HttpService.httpService(host, port, useTls)
-        val httpRequest = HttpRequest.httpRequest(httpService, request)
+        // Build the request from bytes (UTF-8) rather than the lossy String overload,
+        // which mangles multibyte codepoints to Latin-1 and corrupts Content-Length.
+        val httpRequest = HttpRequest.httpRequest(httpService, requestToByteArray(request))
 
         val httpResponse = if (response != null) {
             HttpResponse.httpResponse(response)
@@ -215,5 +218,26 @@ class SitemapBridge(private val api: MontoyaApi) {
             put("url", url)
             put("has_request_response", request != null)
         }
+    }
+
+    companion object {
+        /**
+         * Encode a raw HTTP request String to raw bytes using UTF-8, preserving multibyte
+         * codepoints so Content-Length stays byte-accurate. This is the pure, testable core
+         * of the fix: the previous code path handed the String to the lossy
+         * HttpRequest.httpRequest(service, String) overload, which silently narrowed each
+         * character to Latin-1 and corrupted any non-ASCII body/path. UTF-8 is used to match
+         * the byte-oriented http_send_raw_bytes construction.
+         */
+        fun encodeRequestBytes(request: String): kotlin.ByteArray =
+            request.toByteArray(Charsets.UTF_8)
+
+        /**
+         * Wrap [encodeRequestBytes] into a Montoya ByteArray for HttpRequest construction.
+         * Kept separate so the charset behaviour above can be unit-tested without the
+         * compileOnly Montoya runtime.
+         */
+        fun requestToByteArray(request: String): BurpByteArray =
+            BurpByteArray.byteArray(*encodeRequestBytes(request))
     }
 }

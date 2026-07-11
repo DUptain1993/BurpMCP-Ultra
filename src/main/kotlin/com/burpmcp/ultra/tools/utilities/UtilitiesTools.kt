@@ -210,11 +210,13 @@ object UtilitiesTools {
             name = "util_compress",
             description = "Compress data using the specified algorithm. Parameters: " +
                 "data (required, base64-encoded input data), algorithm (required, " +
-                "one of: GZIP, DEFLATE, BROTLI). Returns base64-encoded compressed data.",
+                "one of: GZIP, DEFLATE). Returns base64-encoded compressed data. " +
+                "(BROTLI is not supported for compression by Burp; it is available " +
+                "for util_decompress only.)",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
                     putJsonObject("data") { put("type", "string"); put("description", "Base64-encoded input data") }
-                    putJsonObject("algorithm") { put("type", "string"); put("description", "Compression algorithm: GZIP, DEFLATE, BROTLI") }
+                    putJsonObject("algorithm") { put("type", "string"); put("description", "Compression algorithm: GZIP, DEFLATE") }
                 },
                 required = listOf("data", "algorithm")
             )

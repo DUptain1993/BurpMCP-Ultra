@@ -541,6 +541,10 @@ class ScannerBridge(
                 else -> throw IllegalArgumentException("Invalid confidence '$confidence'. Allowed: certain, firm, tentative")
             }
 
+            // The schema documents 'request'/'response' as plain HTTP messages,
+            // so accept plain HTTP text directly. Base64 is still accepted for
+            // backward compatibility (see decodeMessagePayload). Evidence is
+            // attached only when both request and response are supplied.
             var requestResponse: HttpRequestResponse? = null
             if (request != null && response != null) {
                 // Same fix as SitemapBridge.addIssue: a request built without an HttpService
@@ -553,11 +557,15 @@ class ScannerBridge(
                 val port = if (parsedUrl.port != -1) parsedUrl.port else if (useTls) 443 else 80
                 val httpService = HttpService.httpService(host, port, useTls)
 
-                val reqBytes = Base64.getDecoder().decode(request)
+                val reqBytes = decodeMessagePayload(request)
                 val httpRequest = HttpRequest.httpRequest(BurpByteArray.byteArray(*reqBytes)).withService(httpService)
-                val respBytes = Base64.getDecoder().decode(response)
+                val respBytes = decodeMessagePayload(response)
                 val httpResponse = HttpResponse.httpResponse(BurpByteArray.byteArray(*respBytes))
                 requestResponse = HttpRequestResponse.httpRequestResponse(httpRequest, httpResponse)
+            } else if ((request == null) != (response == null)) {
+                throw IllegalArgumentException(
+                    "Attaching HTTP evidence requires both 'request' and 'response' to be provided"
+                )
             }
 
             val issue = AuditIssue.auditIssue(
@@ -909,6 +917,57 @@ class ScannerBridge(
                     })
                 }
             })
+        }
+    }
+
+    companion object {
+        /**
+         * Decodes an HTTP message payload supplied to [createCustomIssue].
+         *
+         * The `scanner_create_issue` schema documents `request`/`response` as
+         * plain HTTP messages, so plain HTTP text is the primary supported form.
+         * A payload is only treated as base64 when it is *unambiguously* base64:
+         * it must consist solely of base64 alphabet characters (no spaces, CR,
+         * LF, or other whitespace — all of which appear in any real HTTP message
+         * but never in base64) and must decode cleanly. Anything else is encoded
+         * as plain HTTP text with CRLF line endings, byte-accurate under an
+         * explicit charset.
+         */
+        internal fun decodeMessagePayload(payload: String): ByteArray {
+            if (looksLikeBase64(payload)) {
+                try {
+                    return Base64.getDecoder().decode(payload)
+                } catch (_: IllegalArgumentException) {
+                    // Not valid base64 after all; fall through to plain-text handling.
+                }
+            }
+            // Treat as plain HTTP text. Normalize line endings to CRLF (Burp
+            // parses on \r\n) using the repo's 3-step normalization, then encode
+            // byte-accurately with an explicit charset.
+            val normalized = payload
+                .replace("\r\n", "\n")
+                .replace(Regex("(?<!\\r)\\n"), "\r\n")
+            return normalized.toByteArray(Charsets.ISO_8859_1)
+        }
+
+        /**
+         * True only when [s] is a non-empty string drawn purely from the base64
+         * alphabet (with optional '=' padding). Any whitespace — space, tab, CR,
+         * or LF — disqualifies it, which cleanly excludes every real HTTP message
+         * (all contain spaces in the request/status line and CRLF separators).
+         */
+        internal fun looksLikeBase64(s: String): Boolean {
+            if (s.isEmpty() || s.length % 4 != 0) return false
+            var sawPad = false
+            for (c in s) {
+                when {
+                    c == '=' -> sawPad = true
+                    sawPad -> return false // padding only allowed at the end
+                    c in 'A'..'Z' || c in 'a'..'z' || c in '0'..'9' || c == '+' || c == '/' -> {}
+                    else -> return false
+                }
+            }
+            return true
         }
     }
 }

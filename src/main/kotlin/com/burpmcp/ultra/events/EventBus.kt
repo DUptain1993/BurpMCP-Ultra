@@ -81,7 +81,9 @@ class EventBus(private val maxBufferSize: Int = 10000) {
      * [maxEvents] results. Used for cursor-based polling by MCP clients.
      */
     fun getEvents(sinceId: Long = 0, maxEvents: Int = 200): List<BurpEvent> {
-        return buffer.filter { it.id > sinceId }.take(maxEvents)
+        // Clamp to a non-negative, bounded ceiling so a hostile/negative
+        // maxEvents can never trip Iterable.take()'s require(n >= 0).
+        return buffer.filter { it.id > sinceId }.take(maxEvents.coerceIn(0, maxBufferSize))
     }
 
     /**
@@ -93,7 +95,9 @@ class EventBus(private val maxBufferSize: Int = 10000) {
         sinceId: Long = 0,
         maxEvents: Int = 200
     ): List<BurpEvent> {
-        return buffer.filter { it.id > sinceId && it.type in types }.take(maxEvents)
+        // Clamp to a non-negative, bounded ceiling so a hostile/negative
+        // maxEvents can never trip Iterable.take()'s require(n >= 0).
+        return buffer.filter { it.id > sinceId && it.type in types }.take(maxEvents.coerceIn(0, maxBufferSize))
     }
 
     /**

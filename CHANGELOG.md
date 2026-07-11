@@ -13,6 +13,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   server. `http_send_request` (and its `_parallel` / `_chain` siblings) now **strip control chars
   from the structured inputs** before building the request; `raw_request` / `http_send_raw_bytes`
   stay verbatim so intentional CRLF (request-smuggling research) still works. (`RequestHygiene.stripControl`)
+- **32 tool bugs from a full 149-tool live QA sweep** (each reproduced against `ginandjuice.shop`,
+  fixed, and unit-tested — **+167 tests**). Highlights:
+  - `analyze_*` now normalize **LF→CRLF** before parsing, so LF-delimited requests (what the MCP
+    transport delivers) no longer parse with `header_count: 0` / no params; empty input returns a
+    clean error instead of leaking a `StringIndexOutOfBounds`.
+  - The three `config_*` write tools (**match-replace**, **proxy-listener**, **upstream-proxy**) now
+    emit Burp's correct (nested) JSON schema instead of always failing.
+  - `http_cookie_jar_set` no longer **transposes domain/path**; `http_fuzz` honors custom markers +
+    UTF-8 payloads + rejects bad offsets; `organizer_get_items`, `bcheck_create`, `graphql_probe`,
+    `websocket_*` (bounded `ws://`, correct close/lookup), `api_import_openapi`, `bambda_import`
+    (reports compile failures), `scanner_generate_report` (blank/dir path → generated filename).
+  - Many input-validation leaks fixed (empty input, negative counts/indexes, invalid enums →
+    actionable errors instead of raw JVM exceptions).
 
 ### Changed
 - **Native UI redesign** — a cohesive dark + crimson brand across the Burp extension tabs: a branded

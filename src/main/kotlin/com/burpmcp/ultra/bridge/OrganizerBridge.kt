@@ -54,23 +54,33 @@ class OrganizerBridge(private val api: MontoyaApi) {
      * Retrieves items currently in the Organizer, with optional URL prefix
      * filtering and result limiting.
      *
-     * @param urlPrefix Optional URL prefix to filter items (e.g. "https://example.com").
-     * @param maxResults Maximum number of items to return (default 100).
+     * The Montoya [burp.api.montoya.organizer.OrganizerItem] extends
+     * [HttpRequestResponse], whose accessors ([HttpRequestResponse.url],
+     * [HttpRequestResponse.httpService], ...) can throw or return `null`
+     * depending on how the item was stored. Each field is therefore read
+     * independently and defensively so that one unreadable accessor never
+     * discards an otherwise-valid item (previously every item collapsed to
+     * `{"error":"failed to read item details"}`).
+     *
+     * @param urlPrefix Optional substring to filter items by URL (case-insensitive).
+     * @param maxResults Maximum number of items to return (default 100). Negative
+     *   values are rejected with a clean error object rather than leaking the raw
+     *   [IllegalArgumentException] thrown by [List.take].
      * @return JSON object containing the matching Organizer items.
      */
     fun getItems(urlPrefix: String?, maxResults: Int): JsonObject {
+        if (maxResults < 0) {
+            return buildJsonObject {
+                put("error", "max_results must be non-negative (got $maxResults)")
+            }
+        }
+
         val allItems = api.organizer().items()
 
-        val filtered = if (urlPrefix != null) {
-            allItems.filter { item ->
-                try {
-                    item.url().contains(urlPrefix, ignoreCase = true)
-                } catch (_: Exception) {
-                    false
-                }
-            }
-        } else {
+        val filtered = if (urlPrefix.isNullOrEmpty()) {
             allItems
+        } else {
+            allItems.filter { item -> matchesUrlFilter(safeUrl(item), urlPrefix) }
         }
 
         val limited = filtered.take(maxResults)
@@ -82,24 +92,62 @@ class OrganizerBridge(private val api: MontoyaApi) {
             putJsonArray("items") {
                 for (item in limited) {
                     addJsonObject {
-                        try {
-                            put("url", item.url())
-                            put("method", item.request().method())
-                            put("host", item.httpService().host())
-                            put("port", item.httpService().port())
-                            put("use_tls", item.httpService().secure())
+                        // Read every field independently: a single failing accessor
+                        // must not discard the whole item.
+                        safeUrl(item)?.let { put("url", it) }
+                        runCatching { item.request()?.method() }.getOrNull()?.let { put("method", it) }
 
-                            if (item.hasResponse()) {
-                                val resp = item.response()
-                                put("status_code", resp.statusCode())
-                                put("response_length", resp.body().length())
+                        val service = runCatching { item.httpService() }.getOrNull()
+                        if (service != null) {
+                            runCatching { service.host() }.getOrNull()?.let { put("host", it) }
+                            runCatching { service.port() }.getOrNull()?.let { put("port", it) }
+                            runCatching { service.secure() }.getOrNull()?.let { put("use_tls", it) }
+                        }
+
+                        val hasResponse = runCatching { item.hasResponse() }.getOrDefault(false)
+                        if (hasResponse) {
+                            val resp = runCatching { item.response() }.getOrNull()
+                            if (resp != null) {
+                                runCatching { resp.statusCode().toInt() }.getOrNull()?.let { put("status_code", it) }
+                                runCatching { resp.body().length() }.getOrNull()?.let { put("response_length", it) }
                             }
-                        } catch (_: Exception) {
-                            put("error", "failed to read item details")
                         }
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Best-effort extraction of an item's URL. Returns `null` (instead of
+     * throwing) when the underlying request has no associated service or the
+     * accessor is otherwise unsupported for the stored item.
+     */
+    private fun safeUrl(item: HttpRequestResponse): String? =
+        runCatching { item.url() }.getOrNull()
+            ?: runCatching { item.request()?.url() }.getOrNull()
+
+    companion object {
+        /**
+         * Case-insensitive substring match used for the `url_prefix` filter. A
+         * `null` URL never matches; an empty/blank filter matches everything.
+         * Pure — extracted so it can be unit-tested without a live Montoya API.
+         */
+        internal fun matchesUrlFilter(url: String?, filter: String?): Boolean {
+            if (filter.isNullOrEmpty()) return true
+            if (url == null) return false
+            return url.contains(filter, ignoreCase = true)
+        }
+
+        /**
+         * Clamps a caller-supplied result limit into a safe range. Negative
+         * limits are invalid (callers should surface an error); this returns the
+         * count actually applied by [List.take] for a given available size.
+         * Pure — extracted for unit testing.
+         */
+        internal fun effectiveReturnCount(available: Int, maxResults: Int): Int {
+            if (maxResults <= 0) return 0
+            return minOf(available, maxResults)
         }
     }
 }
