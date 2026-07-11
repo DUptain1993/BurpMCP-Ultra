@@ -469,14 +469,25 @@ class ScannerBridge(
             // primitive (e.g. ~/.bashrc, autostart entries). Absolute paths outside
             // the base and ".." traversal are rejected; everything else resolves
             // under <user.home>/.burpmcp-ultra/reports/.
+            val ext = if (format.equals("XML", ignoreCase = true)) "xml" else "html"
             val baseDir = java.io.File(System.getProperty("user.home"), ".burpmcp-ultra/reports").canonicalFile
             baseDir.mkdirs()
-            val requested = java.io.File(outputPath)
-            val target = (if (requested.isAbsolute) requested else java.io.File(baseDir, outputPath)).canonicalFile
+            // Issue #20: a blank output_path (or one that resolves to the reports directory itself)
+            // must NOT be handed to Burp as the report file — Burp would try to write to a directory
+            // and throw FileNotFoundException ("Is a directory"). Fall back to a generated filename.
+            val requestedName = outputPath.trim()
+            val requested =
+                if (requestedName.isBlank()) java.io.File(baseDir, "report-${System.currentTimeMillis()}.$ext")
+                else java.io.File(requestedName)
+            var target = (if (requested.isAbsolute) requested else java.io.File(baseDir, requestedName)).canonicalFile
             if (target.path != baseDir.path && !target.path.startsWith(baseDir.path + java.io.File.separator)) {
                 return buildJsonObject {
                     put("error", "output_path escapes the allowed reports directory ($baseDir): $outputPath")
                 }
+            }
+            // Still pointing at a directory (base dir or an existing dir) → give it a real filename.
+            if (target.path == baseDir.path || target.isDirectory) {
+                target = java.io.File(target, "report-${System.currentTimeMillis()}.$ext").canonicalFile
             }
             target.parentFile?.mkdirs()
 
