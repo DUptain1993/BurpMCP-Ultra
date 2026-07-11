@@ -820,21 +820,33 @@ class HttpBridge(
         preserveHeaders: Boolean = true,
         autoFixContentLength: Boolean = true
     ): HttpRequest {
+        // Issue #7 (reopened): strip raw CR/LF (and other C0 control chars) from the STRUCTURED
+        // inputs so a stray newline — commonly emitted by an LLM — can't reach the HTTP/2 :path or
+        // split a header and get the request "kettled" / RST_STREAM'd (PROTOCOL_ERROR) by the server.
+        // The url-only path (buildFromUrlMontoya → httpRequestFromUrl) previously passed the raw url
+        // straight through. raw_request / http_send_raw_bytes stay verbatim so intentional CRLF
+        // (request-smuggling research) still works. RequestHygiene.scan still surfaces a warning.
+        val cUrl = url?.let { RequestHygiene.stripControl(it) }
+        val cMethod = method?.let { RequestHygiene.stripControl(it) }
+        val cHeaders = headers?.entries?.associate {
+            RequestHygiene.stripControl(it.key) to RequestHygiene.stripControl(it.value)
+        }
+
         var request: HttpRequest = if (rawRequest != null) {
             buildFromRawRequest(rawRequest, host, port, useTls, autoFixContentLength)
-        } else if (url != null) {
-            if (preserveHeaders && !headers.isNullOrEmpty()) {
-                buildFromUrlPreservingHeaders(url, method, headers, body, host, port, useTls)
+        } else if (cUrl != null) {
+            if (preserveHeaders && !cHeaders.isNullOrEmpty()) {
+                buildFromUrlPreservingHeaders(cUrl, cMethod, cHeaders, body, host, port, useTls)
             } else {
-                buildFromUrlMontoya(url, method, headers, body, host, port, useTls)
+                buildFromUrlMontoya(cUrl, cMethod, cHeaders, body, host, port, useTls)
             }
         } else {
             throw IllegalArgumentException("Either 'url' or 'raw_request' must be provided")
         }
 
-        // For raw_request: allow extra header overrides via headers map (replaces existing)
+        // For raw_request: allow extra (sanitized) header overrides via the headers map.
         if (rawRequest != null) {
-            headers?.forEach { (name, value) ->
+            cHeaders?.forEach { (name, value) ->
                 request = request.withHeader(name, value)
             }
         }
