@@ -552,6 +552,11 @@ given host then
         ): String {
             val sb = StringBuilder()
 
+            // QA #32 (live-verified): Burp's BCheck v2-beta parser rejects `severity: information`
+            // ("Unexpected token information") — it expects `info`. Callers still pass "information"
+            // (matching AuditIssueSeverity + the tool schema); we emit the token Burp accepts.
+            val emitSeverity = if (severity.equals("information", ignoreCase = true)) "info" else severity.lowercase()
+
             // Metadata
             sb.appendLine("metadata:")
             sb.appendLine("    language: v2-beta")
@@ -575,7 +580,7 @@ given host then
                     val (op, cond) = normalizeCondition(matchCondition, matchPattern ?: "")
                     sb.appendLine("    if $location $op \"${escapeRegex(cond)}\" then")
                     sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            severity: $emitSeverity")
                     sb.appendLine("            confidence: $confidence")
                     sb.appendLine("            detail: `$detail`")
                     sb.appendLine("            remediation: `$remediation`")
@@ -592,7 +597,7 @@ given host then
                     val (op, cond) = normalizeCondition(matchCondition, matchPattern ?: "")
                     sb.appendLine("    if $location $op \"${escapeRegex(cond)}\" then")
                     sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            severity: $emitSeverity")
                     sb.appendLine("            confidence: $confidence")
                     sb.appendLine("            detail: `$detail`")
                     sb.appendLine("            remediation: `$remediation`")
@@ -623,7 +628,7 @@ given host then
                         sb.appendLine()
                         sb.appendLine("    if {$varName.response.body} matches \"${escapeRegex(respMatch)}\" then")
                         sb.appendLine("        report issue:")
-                        sb.appendLine("            severity: $severity")
+                        sb.appendLine("            severity: $emitSeverity")
                         sb.appendLine("            confidence: $confidence")
                         sb.appendLine("            detail: `$detail Payload: $payload`")
                         sb.appendLine("            remediation: `$remediation`")
@@ -643,7 +648,7 @@ given host then
                     sb.appendLine("    if {host_check.response.status_code} is \"200\" and")
                     sb.appendLine("        {host_check.response.body} $op \"${escapeRegex(cond)}\" then")
                     sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            severity: $emitSeverity")
                     sb.appendLine("            confidence: $confidence")
                     sb.appendLine("            detail: `$detail`")
                     sb.appendLine("            remediation: `$remediation`")
@@ -668,7 +673,7 @@ given host then
                     sb.appendLine()
                     sb.appendLine("    if {path_check.response.status_code} is \"200\" then")
                     sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            severity: $emitSeverity")
                     sb.appendLine("            confidence: $confidence")
                     sb.appendLine("            detail: `$detail Found at: {path_check.request.url}`")
                     sb.appendLine("            remediation: `$remediation`")
@@ -685,7 +690,7 @@ given host then
                     val interactionType = if (collaboratorPayloadType?.trim()?.lowercase() == "http") "http" else "dns"
                     sb.appendLine("    if $interactionType interactions then")
                     sb.appendLine("        report issue:")
-                    sb.appendLine("            severity: $severity")
+                    sb.appendLine("            severity: $emitSeverity")
                     sb.appendLine("            confidence: $confidence")
                     sb.appendLine("            detail: `$detail`")
                     sb.appendLine("            remediation: `$remediation`")

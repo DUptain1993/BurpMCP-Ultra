@@ -111,6 +111,30 @@ class BCheckBridgeTest {
         assertFalse(script.contains("matches \"\""), "must not emit matches \"\": $script")
     }
 
+    // ---- severity 'information' must emit the token Burp accepts: 'info' (QA #32, live-verified) --
+
+    @Test
+    fun `severity information is emitted as info, not information`() {
+        val info = BCheckBridge.emitScript(
+            name = "x", description = "d", author = "a", tags = "t",
+            type = "passive_response",
+            matchPattern = "abc", matchLocation = "response_body", matchCondition = "matches",
+            payloads = null, responseMatchPattern = null, collaboratorPayloadType = null,
+            severity = "information", confidence = "tentative", issueDetail = null, issueRemediation = null
+        )
+        assertTrue(info.contains("severity: info"), "must emit BCheck token 'info': $info")
+        assertFalse(info.contains("severity: information"), "Burp's BCheck parser rejects 'information': $info")
+
+        val high = BCheckBridge.emitScript(
+            name = "x", description = "d", author = "a", tags = "t",
+            type = "passive_response",
+            matchPattern = "abc", matchLocation = "response_body", matchCondition = "matches",
+            payloads = null, responseMatchPattern = null, collaboratorPayloadType = null,
+            severity = "high", confidence = "firm", issueDetail = null, issueRemediation = null
+        )
+        assertTrue(high.contains("severity: high"), high)
+    }
+
     @Test
     fun `insertion_point with a single match pattern still emits a valid block`() {
         val script = BCheckBridge.emitScript(
