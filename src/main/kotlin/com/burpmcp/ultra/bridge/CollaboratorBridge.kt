@@ -114,10 +114,23 @@ class CollaboratorBridge(
         val clientState = stateManager.collaboratorClients[clientId]
             ?: return buildJsonObject { put("error", "Client not found: $clientId") }
 
+        // Montoya's CollaboratorClient.generatePayload(customData) rejects any label
+        // longer than 16 chars or containing non-alphanumerics with a raw
+        // IllegalArgumentException ("Length of custom data must not exceed 16
+        // alphanumeric characters"). Fit the label to that constraint up front so an
+        // over-long/decorated label degrades gracefully instead of failing the call.
+        val sanitized = customData?.let { sanitizeCustomData(it) }
+        if (sanitized != null && sanitized.effective.isEmpty()) {
+            return buildJsonObject {
+                put("error", "custom_data must contain at least one alphanumeric character; Burp Collaborator allows up to $MAX_CUSTOM_DATA alphanumeric characters.")
+            }
+        }
+        val effectiveCustom = sanitized?.effective
+
         return try {
             val client = clientState.client as CollaboratorClient
-            val payload: CollaboratorPayload = if (customData != null) {
-                client.generatePayload(customData)
+            val payload: CollaboratorPayload = if (effectiveCustom != null) {
+                client.generatePayload(effectiveCustom)
             } else {
                 client.generatePayload()
             }
@@ -131,8 +144,11 @@ class CollaboratorBridge(
                 put("client_id", clientId)
                 put("payload", payloadStr)
                 put("interaction_url", "http://$payloadStr")
-                if (customData != null) {
-                    put("custom_data", customData)
+                if (effectiveCustom != null) {
+                    put("custom_data", effectiveCustom)
+                }
+                if (sanitized?.adjusted == true) {
+                    put("warning", sanitized.note)
                 }
             }
         } catch (e: Exception) {
@@ -381,6 +397,44 @@ class CollaboratorBridge(
                     })
                 }
             }
+        }
+    }
+
+    /**
+     * Pure, Montoya-independent helpers, kept `internal` so unit tests can
+     * exercise the validation logic without a live Collaborator client (the
+     * Montoya API is compileOnly and cannot be instantiated in tests).
+     */
+    internal companion object {
+        /** Burp Collaborator custom-data limit: at most 16 ASCII-alphanumeric characters. */
+        const val MAX_CUSTOM_DATA = 16
+
+        /** Result of fitting a caller-supplied label to the Collaborator constraint. */
+        data class CustomData(val effective: String, val adjusted: Boolean, val note: String?)
+
+        /**
+         * Fits arbitrary caller input to Montoya's `generatePayload(customData)`
+         * constraint (≤16 ASCII-alphanumeric characters). Non-alphanumeric
+         * characters are stripped and the result is truncated to 16 chars; the
+         * returned [CustomData.note] explains any adjustment so the caller can
+         * correlate on the value actually embedded. An all-non-alphanumeric input
+         * yields an empty [CustomData.effective], which the caller rejects.
+         */
+        fun sanitizeCustomData(raw: String): CustomData {
+            val alnum = raw.filter { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }
+            val effective = alnum.take(MAX_CUSTOM_DATA)
+            val strippedNonAlnum = alnum.length != raw.length
+            val truncated = alnum.length > MAX_CUSTOM_DATA
+            val note = when {
+                strippedNonAlnum && truncated ->
+                    "custom_data had non-alphanumeric characters removed and was truncated to $MAX_CUSTOM_DATA chars; embedded '$effective'"
+                strippedNonAlnum ->
+                    "custom_data had non-alphanumeric characters removed (Collaborator allows alphanumeric only); embedded '$effective'"
+                truncated ->
+                    "custom_data was truncated to $MAX_CUSTOM_DATA chars (Collaborator limit); embedded '$effective'"
+                else -> null
+            }
+            return CustomData(effective, note != null, note)
         }
     }
 }

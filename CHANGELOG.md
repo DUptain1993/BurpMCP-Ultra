@@ -26,6 +26,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   per-message WebSocket authz, gateway trusted-header forgery, second-order/async IDOR, cache-key
   mixing, cross-protocol object diffing).
 
+### Fixed
+- **`collaborator_generate_payload` crash on long/decorated custom data** — Montoya's
+  `CollaboratorClient.generatePayload(customData)` rejects any label longer than 16 chars or
+  containing non-alphanumerics with a raw `IllegalArgumentException` ("Length of custom data must
+  not exceed 16 alphanumeric characters"), which leaked to the client and spammed the extension
+  error log. The tool now **sanitizes the label to fit** (strips non-alphanumerics, truncates to 16)
+  and returns a `warning` plus the `custom_data` actually embedded, so an over-long correlation
+  label degrades gracefully instead of failing the call; an all-non-alphanumeric label returns a
+  clean actionable error. (`CollaboratorBridge.sanitizeCustomData`, **+8 tests**)
+
 ## [2.3.0] — Unreleased
 
 ### Fixed
