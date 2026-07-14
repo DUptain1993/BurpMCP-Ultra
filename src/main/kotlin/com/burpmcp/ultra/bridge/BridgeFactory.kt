@@ -42,7 +42,8 @@ class BridgeFactory {
         val graphql: GraphQlBridge,
         val webProbe: WebProbeBridge,
         val accessControl: AccessControlBridge,
-        val injection: InjectionBridge
+        val injection: InjectionBridge,
+        val idorHunt: IdorHuntBridge
     )
 
     companion object {
@@ -89,7 +90,8 @@ class BridgeFactory {
                 graphql = GraphQlBridge(api),
                 webProbe = WebProbeBridge(api),
                 accessControl = AccessControlBridge(api),
-                injection = InjectionBridge(api)
+                injection = InjectionBridge(api),
+                idorHunt = IdorHuntBridge(api)
             )
         }
     }

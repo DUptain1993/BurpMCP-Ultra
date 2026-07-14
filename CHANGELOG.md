@@ -4,6 +4,28 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
+## [2.4.0] — Unreleased
+
+### Added
+- **`idor_hunt` — horizontal object-id IDOR with canary confirmation (tool #150).**
+  The object-id swap that `auth_diff` / `access_control_sweep` deliberately do not do: those
+  vary the *auth identity* while holding the object reference constant (great for vertical /
+  unauthenticated access control). `idor_hunt` additionally **swaps the object id across
+  identities** and, for every (reader, owner) pair, asserts the **owner's canary** appears in the
+  reader's response — a **confirmed cross-user read** — while filtering the dominant own-data-
+  reflection false positive. It auto-detects the id in path/query/body/header/cookie and classifies
+  the format (int / uuid v1·v4·v7 / MongoDB ObjectID / snowflake / md5·sha1·sha256 / base64 / gid),
+  runs the identity-diff (vertical/unauth) for free, and can replay a bounded id-transformation set
+  (encodings, neighbours, type-juggling). Scope-gated (`mcp_scope_mode`) and bounded like every
+  other send. New pure engine `IdorHunt` (**+23 unit tests**) + `IdorHuntBridge`.
+- **Combined IDOR methodology** — the tool and its companion `burp-idor` Claude skill are built on a
+  lossless union of every IDOR/BOLA/BFLA source on the author's system (a dedicated 25-file
+  idor-agent KB, the auth-authz skill's 9-part authz-deep set, and the API/auth/business-logic
+  agents): **790 extracted techniques → 312 deduplicated across 30 categories**, with completeness-
+  critic gap-fills (HTTP/2 desync as auth-context inheritance, gRPC field-number tampering,
+  per-message WebSocket authz, gateway trusted-header forgery, second-order/async IDOR, cache-key
+  mixing, cross-protocol object diffing).
+
 ## [2.3.0] — Unreleased
 
 ### Fixed

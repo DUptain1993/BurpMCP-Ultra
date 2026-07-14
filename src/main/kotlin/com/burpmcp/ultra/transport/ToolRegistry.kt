@@ -39,6 +39,7 @@ import com.burpmcp.ultra.tools.graphql.GraphQlTools
 import com.burpmcp.ultra.tools.webprobe.WebProbeTools
 import com.burpmcp.ultra.tools.accesscontrol.AccessControlTools
 import com.burpmcp.ultra.tools.injection.InjectionTools
+import com.burpmcp.ultra.tools.idor.IdorTools
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 
 /**
@@ -171,5 +172,8 @@ object ToolRegistry {
 
         // Injection probe: guided sqli/ssti/lfi detection with confirmation oracles (scope-gated)
         InjectionTools.register(server, bridges.injection)
+
+        // IDOR hunt: horizontal object-id swap with canary confirmation (scope-gated)
+        IdorTools.register(server, bridges.idorHunt)
     }
 }
