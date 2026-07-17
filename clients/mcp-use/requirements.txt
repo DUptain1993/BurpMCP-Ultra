@@ -1,0 +1,4 @@
+# Headless mcp-use client for BurpMCP-Ultra. Requires Python 3.11+.
+mcp-use
+langchain-openai
+python-dotenv
