@@ -2,9 +2,11 @@ name: build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, 'claude/**' ]
   pull_request:
     branches: [ main ]
+  # Allow building the jar on demand from any branch via the Actions tab.
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,3 +29,12 @@ jobs:
         run: |
           chmod +x ./gradlew
           ./gradlew build --no-daemon --stacktrace
+
+      # Publish the fat (shadow) JAR so it can be downloaded from the workflow run's
+      # "Artifacts" section — build/libs/burpmcp-ultra-<version>.jar is the loadable extension.
+      - name: Upload extension JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: burpmcp-ultra-jar
+          path: build/libs/burpmcp-ultra-*.jar
+          if-no-files-found: error
