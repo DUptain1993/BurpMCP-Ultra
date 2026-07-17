@@ -2,6 +2,7 @@ package com.burpmcp.ultra.core
 
 import burp.api.montoya.BurpExtension
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.agent.AgentRunner
 import com.burpmcp.ultra.transport.ActivityStore
 import com.burpmcp.ultra.transport.AuditLog
 import com.burpmcp.ultra.transport.BindHostPolicy
@@ -119,8 +120,17 @@ class BurpMcpUltraExtension : BurpExtension {
             // Register Burp Suite event handlers for proxy, scanner, scope, websocket, and HTTP traffic
             registerBurpHandlers(bridges)
 
+            // Dedicated, unconnected MCP Server instance (no transport/socket) purely so the
+            // AI Agent tab can read its `.tools` map and invoke handlers in-process. Reuses
+            // McpServerManager.createMcpServer() so it carries the exact same tool set, JSON
+            // schemas, and ToolCallTracker/ScopeGate/ActionPolicy wiring as the real SSE
+            // servers — the natural-language agent inherits the same safety envelope as any
+            // external MCP client, with no separate policy path to maintain.
+            val agentToolServer = serverManager.createMcpServer()
+            val agentRunner = AgentRunner(agentToolServer, api.logging())
+
             // Initialize and register the UI tab
-            uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken, bindHost, ::rebindServers)
+            uiTab = BurpMcpUltraTab(api, serverManager, eventBus, stateManager, bridges, authToken, bindHost, ::rebindServers, agentRunner)
             api.userInterface().registerSuiteTab("BurpMCP-Ultra", uiTab.getComponent())
         } catch (t: Throwable) {
             api.logging().logToError(

@@ -6,6 +6,10 @@ import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.ui.editor.EditorOptions
 import burp.api.montoya.ui.editor.HttpRequestEditor
 import burp.api.montoya.ui.editor.HttpResponseEditor
+import com.burpmcp.ultra.agent.AgentConfig
+import com.burpmcp.ultra.agent.AgentEvent
+import com.burpmcp.ultra.agent.AgentRunner
+import com.burpmcp.ultra.agent.VeniceAiClient
 import com.burpmcp.ultra.bridge.BridgeFactory
 import com.burpmcp.ultra.core.ConnectionInfo
 import com.burpmcp.ultra.core.RebindOutcome
@@ -15,6 +19,7 @@ import com.burpmcp.ultra.state.StateManager
 import com.burpmcp.ultra.transport.ActivityStore
 import com.burpmcp.ultra.transport.BindHostPolicy
 import com.burpmcp.ultra.transport.McpServerManager
+import kotlinx.coroutines.Job
 import kotlinx.serialization.json.*
 import java.awt.*
 import java.awt.datatransfer.StringSelection
@@ -43,6 +48,7 @@ import javax.swing.table.DefaultTableModel
  * 4. Collaborator    — Create OOB clients, generate payloads, poll interactions
  * 5. Rules           — View/manage proxy, traffic, and session rules
  * 6. Server          — Server config, connection info, stats
+ * 7. AI Agent        — Natural-language goal -> Venice AI-driven tool-calling loop
  */
 class BurpMcpUltraTab(
     private val api: MontoyaApi,
@@ -52,7 +58,8 @@ class BurpMcpUltraTab(
     private val bridges: BridgeFactory.Bridges,
     private val authToken: String,
     private val bindHost: String,
-    private val rebindNow: (String, Boolean) -> RebindOutcome
+    private val rebindNow: (String, Boolean) -> RebindOutcome,
+    private val agentRunner: AgentRunner
 ) {
     companion object {
         const val MAX_TABLE_ROWS = 2000
@@ -85,6 +92,7 @@ class BurpMcpUltraTab(
         tabbedPane.addTab("Collaborator", buildCollaboratorTab())
         tabbedPane.addTab("Rules", buildRulesTab())
         tabbedPane.addTab("Server", buildServerTab())
+        tabbedPane.addTab("AI Agent", buildAiAgentTab())
         mainPanel.add(tabbedPane, BorderLayout.CENTER)
 
         // Render persisted MCP activity (the deque is seeded on startup by the dashboard
@@ -1071,6 +1079,190 @@ class BurpMcpUltraTab(
             serverCollabLabel.text = "${stateManager.collaboratorClients.size} active"
             serverScanLabel.text = "${stateManager.scanTasks.size} active"
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    //  TAB 7: AI AGENT
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private lateinit var agentGoalInput: JTextArea
+    private lateinit var agentTranscript: JTextArea
+    private lateinit var agentRunButton: JButton
+    private lateinit var agentStopButton: JButton
+    private var agentCurrentJob: Job? = null
+
+    private fun buildAiAgentTab(): JPanel {
+        val panel = JPanel(BorderLayout(0, 0))
+        panel.border = EmptyBorder(12, 12, 12, 12)
+
+        val initial = AgentConfig.load(api)
+
+        val top = JPanel()
+        top.layout = BoxLayout(top, BoxLayout.Y_AXIS)
+
+        // ── Venice AI settings ──────────────────────────────────────────
+        top.add(JLabel("Venice AI Settings").apply { font = font.deriveFont(Font.BOLD, 13f); alignmentX = Component.LEFT_ALIGNMENT })
+
+        val row1 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2))
+        row1.add(JLabel("Base URL:"))
+        val baseUrlField = JTextField(initial.baseUrl, 26)
+        row1.add(baseUrlField)
+        row1.add(JLabel("API Key:"))
+        val apiKeyField = JPasswordField(initial.apiKey, 18)
+        row1.add(apiKeyField)
+        row1.alignmentX = Component.LEFT_ALIGNMENT
+        top.add(row1)
+
+        val row2 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2))
+        row2.add(JLabel("Model:"))
+        val modelCombo = JComboBox<String>().apply {
+            isEditable = true
+            if (initial.model.isNotBlank()) { addItem(initial.model); selectedItem = initial.model }
+            preferredSize = Dimension(260, preferredSize.height)
+        }
+        row2.add(modelCombo)
+        val refreshModelsBtn = JButton("Refresh Models")
+        row2.add(refreshModelsBtn)
+        val modelsStatusLabel = JLabel(" ")
+        row2.add(modelsStatusLabel)
+        row2.alignmentX = Component.LEFT_ALIGNMENT
+        top.add(row2)
+
+        val row3 = JPanel(FlowLayout(FlowLayout.LEFT, 6, 2))
+        row3.add(JLabel("Max steps:"))
+        val maxIterSpinner = JSpinner(SpinnerNumberModel(initial.maxIterations, 1, 100, 1))
+        row3.add(maxIterSpinner)
+        row3.add(JLabel("Temperature:"))
+        val tempSpinner = JSpinner(SpinnerNumberModel(initial.temperature, 0.0, 2.0, 0.1))
+        row3.add(tempSpinner)
+        val saveSettingsBtn = JButton("Save Settings")
+        row3.add(saveSettingsBtn)
+        val settingsStatusLabel = JLabel(" ")
+        row3.add(settingsStatusLabel)
+        row3.alignmentX = Component.LEFT_ALIGNMENT
+        top.add(row3)
+
+        refreshModelsBtn.addActionListener {
+            val probeBaseUrl = baseUrlField.text.trim().ifEmpty { AgentConfig.DEFAULT_BASE_URL }
+            val probeApiKey = String(apiKeyField.password)
+            if (probeApiKey.isBlank()) {
+                JOptionPane.showMessageDialog(panel, "Enter an API key first.", "AI Agent", JOptionPane.WARNING_MESSAGE)
+                return@addActionListener
+            }
+            refreshModelsBtn.isEnabled = false
+            SwingWorker(api, "Fetching Venice AI models") {
+                val client = VeniceAiClient(probeBaseUrl, probeApiKey)
+                val result = client.listModels()
+                result.onSuccess { models ->
+                    SwingUtilities.invokeLater {
+                        val current = (modelCombo.editor.item as? String)?.trim()
+                        modelCombo.removeAllItems()
+                        models.sortedByDescending { it.supportsFunctionCalling }.forEach { modelCombo.addItem(it.id) }
+                        if (!current.isNullOrBlank()) modelCombo.editor.item = current
+                        val fcCount = models.count { it.supportsFunctionCalling }
+                        modelsStatusLabel.text = "${models.size} models (${fcCount} support tool calling)"
+                        refreshModelsBtn.isEnabled = true
+                    }
+                }.onFailure { e ->
+                    SwingUtilities.invokeLater { refreshModelsBtn.isEnabled = true }
+                    throw RuntimeException("Could not fetch models: ${e.message}")
+                }
+            }
+        }
+
+        saveSettingsBtn.addActionListener {
+            val newSettings = AgentConfig.Settings(
+                apiKey = String(apiKeyField.password),
+                baseUrl = baseUrlField.text.trim().ifEmpty { AgentConfig.DEFAULT_BASE_URL },
+                model = (modelCombo.editor.item as? String)?.trim() ?: "",
+                maxIterations = (maxIterSpinner.value as Number).toInt(),
+                temperature = (tempSpinner.value as Number).toDouble()
+            )
+            AgentConfig.save(api, newSettings)
+            settingsStatusLabel.text = "Saved."
+        }
+
+        top.add(JSeparator().apply { alignmentX = Component.LEFT_ALIGNMENT })
+
+        // ── Goal input ──────────────────────────────────────────────────
+        top.add(JLabel("What do you want the agent to do?").apply { font = font.deriveFont(Font.BOLD, 13f); alignmentX = Component.LEFT_ALIGNMENT })
+        agentGoalInput = JTextArea(3, 60).apply { lineWrap = true; wrapStyleWord = true }
+        val goalScroll = JScrollPane(agentGoalInput).apply { alignmentX = Component.LEFT_ALIGNMENT }
+        top.add(goalScroll)
+
+        val runRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 4))
+        agentRunButton = JButton("Run")
+        agentStopButton = JButton("Stop").apply { isEnabled = false }
+        runRow.add(agentRunButton)
+        runRow.add(agentStopButton)
+        runRow.alignmentX = Component.LEFT_ALIGNMENT
+        top.add(runRow)
+
+        panel.add(top, BorderLayout.NORTH)
+
+        // ── Transcript ──────────────────────────────────────────────────
+        agentTranscript = JTextArea().apply {
+            isEditable = false
+            lineWrap = true
+            wrapStyleWord = true
+            font = Font("Monospaced", Font.PLAIN, 12)
+        }
+        panel.add(JScrollPane(agentTranscript), BorderLayout.CENTER)
+
+        fun appendTranscript(tag: String, text: String) {
+            agentTranscript.append("[$tag] $text\n\n")
+            agentTranscript.caretPosition = agentTranscript.document.length
+        }
+
+        fun onRunEnded() {
+            agentRunButton.isEnabled = true
+            agentStopButton.isEnabled = false
+            agentCurrentJob = null
+        }
+
+        agentRunButton.addActionListener {
+            val goal = agentGoalInput.text.trim()
+            if (goal.isEmpty()) {
+                JOptionPane.showMessageDialog(panel, "Describe what you want the agent to do first.", "AI Agent", JOptionPane.WARNING_MESSAGE)
+                return@addActionListener
+            }
+            val settings = AgentConfig.load(api)
+            if (!settings.isConfigured) {
+                JOptionPane.showMessageDialog(
+                    panel,
+                    "Set a Venice AI API key and model above, then click Save Settings, before running the agent.",
+                    "AI Agent", JOptionPane.WARNING_MESSAGE
+                )
+                return@addActionListener
+            }
+            agentTranscript.text = ""
+            appendTranscript("GOAL", goal)
+            agentRunButton.isEnabled = false
+            agentStopButton.isEnabled = true
+            agentCurrentJob = agentRunner.start(settings, goal) { event ->
+                SwingUtilities.invokeLater {
+                    when (event) {
+                        is AgentEvent.AssistantMessage -> appendTranscript("AGENT", event.text)
+                        is AgentEvent.ToolCallStarted -> appendTranscript("TOOL CALL", "${event.name}(${event.argumentsJson})")
+                        is AgentEvent.ToolCallFinished -> appendTranscript(
+                            if (event.isError) "TOOL ERROR" else "TOOL RESULT",
+                            "${event.name} -> ${event.resultSummary}"
+                        )
+                        is AgentEvent.Error -> { appendTranscript("ERROR", event.message); onRunEnded() }
+                        is AgentEvent.Finished -> { appendTranscript("DONE", event.finalText); onRunEnded() }
+                        AgentEvent.Stopped -> { appendTranscript("STOPPED", "Run cancelled by operator."); onRunEnded() }
+                    }
+                }
+            }
+        }
+
+        agentStopButton.addActionListener {
+            agentCurrentJob?.cancel()
+            agentStopButton.isEnabled = false
+        }
+
+        api.userInterface().applyThemeToComponent(panel)
+        return panel
     }
 
     // ═══════════════════════════════════════════════════════════════════════
