@@ -4,6 +4,7 @@ import burp.api.montoya.MontoyaApi
 import burp.api.montoya.core.ByteArray as BurpByteArray
 import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.HttpService
+import com.burpmcp.ultra.safety.RequestHygiene
 import burp.api.montoya.websocket.BinaryMessage
 import burp.api.montoya.websocket.BinaryMessageAction
 import burp.api.montoya.websocket.MessageHandler
@@ -68,8 +69,10 @@ class WebSocketBridge(
         val useTls = scheme == "wss" || scheme == "https"
         val defaultPort = if (useTls) 443 else 80
         val port = if (parsedUrl.port > 0) parsedUrl.port else defaultPort
-        val path = if (parsedUrl.rawPath.isNullOrEmpty()) "/" else parsedUrl.rawPath
-        val query = if (parsedUrl.rawQuery != null) "?${parsedUrl.rawQuery}" else ""
+        // Strip control chars so a stray newline in the path/query can't fold into the
+        // request line and kettle the upgrade (issue #7).
+        val path = RequestHygiene.stripControl(if (parsedUrl.rawPath.isNullOrEmpty()) "/" else parsedUrl.rawPath)
+        val query = RequestHygiene.stripControl(if (parsedUrl.rawQuery != null) "?${parsedUrl.rawQuery}" else "")
 
         // Build the HTTP upgrade request
         val httpService = HttpService.httpService(host, port, useTls)
@@ -86,7 +89,7 @@ class WebSocketBridge(
         }
 
         headers?.forEach { (name, value) ->
-            requestBuilder.append("$name: $value\r\n")
+            requestBuilder.append("${RequestHygiene.stripControl(name)}: ${RequestHygiene.stripControl(value)}\r\n")
         }
 
         requestBuilder.append("\r\n")

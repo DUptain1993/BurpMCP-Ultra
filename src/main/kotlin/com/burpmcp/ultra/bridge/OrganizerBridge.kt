@@ -5,6 +5,7 @@ import burp.api.montoya.http.message.requests.HttpRequest
 import burp.api.montoya.http.message.responses.HttpResponse
 import burp.api.montoya.http.HttpService
 import burp.api.montoya.http.message.HttpRequestResponse
+import com.burpmcp.ultra.safety.RequestHygiene
 import kotlinx.serialization.json.*
 
 class OrganizerBridge(private val api: MontoyaApi) {
@@ -31,7 +32,7 @@ class OrganizerBridge(private val api: MontoyaApi) {
         useTls: Boolean
     ): JsonObject {
         val httpService = HttpService.httpService(host, port, useTls)
-        val httpRequest = HttpRequest.httpRequest(httpService, request)
+        val httpRequest = HttpRequest.httpRequest(httpService, RequestHygiene.normalizeCrlf(request))
 
         if (response != null) {
             val httpResponse = HttpResponse.httpResponse(response)

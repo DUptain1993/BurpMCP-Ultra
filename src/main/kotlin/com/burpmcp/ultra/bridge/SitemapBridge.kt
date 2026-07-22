@@ -10,6 +10,7 @@ import burp.api.montoya.scanner.audit.issues.AuditIssue
 import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity
 import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence
 import burp.api.montoya.http.message.HttpRequestResponse
+import com.burpmcp.ultra.safety.RequestHygiene
 import kotlinx.serialization.json.*
 
 class SitemapBridge(private val api: MontoyaApi) {
@@ -124,7 +125,7 @@ class SitemapBridge(private val api: MontoyaApi) {
         val httpService = HttpService.httpService(host, port, useTls)
         // Build the request from bytes (UTF-8) rather than the lossy String overload,
         // which mangles multibyte codepoints to Latin-1 and corrupts Content-Length.
-        val httpRequest = HttpRequest.httpRequest(httpService, requestToByteArray(request))
+        val httpRequest = HttpRequest.httpRequest(httpService, requestToByteArray(RequestHygiene.normalizeCrlf(request)))
 
         val httpResponse = if (response != null) {
             HttpResponse.httpResponse(response)
@@ -185,7 +186,7 @@ class SitemapBridge(private val api: MontoyaApi) {
             val port = if (parsedUrl.port != -1) parsedUrl.port else if (useTls) 443 else 80
             val httpService = HttpService.httpService(host, port, useTls)
 
-            val httpRequest = HttpRequest.httpRequest(request).withService(httpService)
+            val httpRequest = HttpRequest.httpRequest(RequestHygiene.normalizeCrlf(request)).withService(httpService)
             val httpResponse = if (response != null) {
                 HttpResponse.httpResponse(response)
             } else {

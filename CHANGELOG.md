@@ -35,6 +35,18 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   and returns a `warning` plus the `custom_data` actually embedded, so an over-long correlation
   label degrades gracefully instead of failing the call; an all-non-alphanumeric label returns a
   clean actionable error. (`CollaboratorBridge.sanitizeCustomData`, **+8 tests**)
+- **`repeater_send` (and siblings) produced a "kettled" HTTP/2 request — issue #7, request-line
+  variant.** A raw request with **bare-LF line endings** (what LLMs commonly emit) reached
+  `HttpRequest.httpRequest(service, string)` unnormalized; Montoya could not delimit the request line,
+  so the whole message folded into the HTTP/2 `:path` pseudo-header ("There is a newline in this
+  header's value: :path") and the request landed in Repeater unsendable. The `#7` fix had only covered
+  the *structured* `http_send_request` inputs, not the *raw-request-string* builders. Line-ending
+  **normalization to CRLF is now applied** across `repeater_send`, `intruder_send`,
+  `intruder_send_with_positions` (with byte-offset re-mapping so payload positions stay aligned),
+  `organizer_send`, `sitemap_add_request` / `sitemap_add_issue`, `analyze_insertion_points`, and the
+  injection probe; `websocket_create` strips control chars from the interpolated path/headers. Raw-byte
+  tools (`http_send_raw_bytes` / `raw_request`) still pass through verbatim for smuggling research.
+  (`RequestHygiene.normalizeCrlf` / `adjustedOffset`, one source of truth reused by `AnalysisBridge`, **+6 tests**)
 
 ## [2.3.0] — Unreleased
 

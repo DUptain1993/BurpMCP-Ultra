@@ -321,7 +321,7 @@ class AnalysisBridge(private val api: MontoyaApi) {
         useTls: Boolean
     ): JsonObject {
         val httpService = HttpService.httpService(host, port, useTls)
-        val httpRequest = HttpRequest.httpRequest(httpService, rawRequest)
+        val httpRequest = HttpRequest.httpRequest(httpService, normalizeCrlf(rawRequest))
 
         val insertionPoints = buildJsonArray {
             // URL parameters
@@ -984,9 +984,7 @@ class AnalysisBridge(private val api: MontoyaApi) {
          * silently dropped. Mirrors the 3-step normalization used in authDiff().
          */
         fun normalizeCrlfMessage(raw: String): String =
-            raw.replace("\\r\\n", "\r\n")
-                .replace("\\n", "\n")
-                .replace(Regex("(?<!\r)\n"), "\r\n")
+            com.burpmcp.ultra.safety.RequestHygiene.normalizeCrlf(raw)
 
         /**
          * Produces a caller-safe description of a thrown exception. Some Montoya

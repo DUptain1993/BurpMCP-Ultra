@@ -8,6 +8,7 @@ import burp.api.montoya.intruder.HttpRequestTemplate
 import burp.api.montoya.intruder.PayloadProcessor
 import burp.api.montoya.intruder.PayloadProcessingResult
 import burp.api.montoya.intruder.PayloadData
+import com.burpmcp.ultra.safety.RequestHygiene
 import com.burpmcp.ultra.state.StateManager
 import kotlinx.serialization.json.*
 import java.security.MessageDigest
@@ -17,7 +18,7 @@ class IntruderBridge(private val api: MontoyaApi, private val stateManager: Stat
 
     fun sendToIntruder(request: String, host: String, port: Int, useTls: Boolean, tabName: String?): JsonObject {
         val httpService = HttpService.httpService(host, port, useTls)
-        val httpRequest = HttpRequest.httpRequest(httpService, request)
+        val httpRequest = HttpRequest.httpRequest(httpService, RequestHygiene.normalizeCrlf(request))
 
         if (tabName != null) {
             api.intruder().sendToIntruder(httpRequest, tabName)
@@ -43,10 +44,14 @@ class IntruderBridge(private val api: MontoyaApi, private val stateManager: Stat
         tabName: String?
     ): JsonObject {
         val httpService = HttpService.httpService(host, port, useTls)
-        val httpRequest = HttpRequest.httpRequest(httpService, request)
+        // Normalize line endings (issue #7). Bare-LF → CRLF shifts byte offsets, so the
+        // caller's payload positions are re-mapped onto the normalized request; an
+        // already-CRLF request is unchanged and the offsets pass through untouched.
+        val normalized = RequestHygiene.normalizeCrlf(request)
+        val httpRequest = HttpRequest.httpRequest(httpService, normalized)
 
         val insertionPointOffsets = positions.map { (start, end) ->
-            Range.range(start, end)
+            Range.range(RequestHygiene.adjustedOffset(request, start), RequestHygiene.adjustedOffset(request, end))
         }
 
         val template = HttpRequestTemplate.httpRequestTemplate(
