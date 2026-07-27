@@ -78,19 +78,20 @@ object SecurityConfig {
  *   served HTML so its own same-origin API calls can authenticate. A cross-origin
  *   attacker cannot read that page (same-origin policy) and cannot reach it via
  *   rebinding (Host check), so the token stays confidential.
- * @param isAuthenticatedSession accepts a **live MCP session id** as proof for a back-channel
- *   `POST ?sessionId=...`. The id is a 122-bit random UUID that the server discloses ONLY over an
- *   already token-authenticated SSE stream, so holding one is equivalent to holding the token —
- *   it is a capability derived from it, not a bypass. This keeps the POST working when a client's
- *   URL resolver drops the path-borne token (Java's RFC 2396 `URI.resolve` does exactly that for
- *   a base without a trailing slash — issue #11). Defaults to rejecting everything.
+ *
+ * **A live `sessionId` is deliberately NOT an authentication carrier.** An earlier revision let a
+ * back-channel `POST ?sessionId=...` authenticate on the session id alone, reasoning that the id is
+ * only ever disclosed over an already token-authenticated stream. That premise was false: an
+ * unauthenticated `OPTIONS /` used to open a full SSE stream (the token check below skipped
+ * OPTIONS entirely, and the SSE handler was registered with no method selector), so the id could be
+ * harvested with no credentials at all. Both of those holes are now closed — but the session id
+ * stays non-authenticating regardless, so no future leak of one can become a token bypass.
  */
 fun Application.installLocalhostSecurity(
     token: String,
     ports: List<Int>,
     hosts: List<String> = listOf("127.0.0.1", "localhost"),
-    tokenExemptPaths: Set<String> = emptySet(),
-    isAuthenticatedSession: (String) -> Boolean = { false }
+    tokenExemptPaths: Set<String> = emptySet()
 ) {
     val (allowedHosts, allowedOrigins) = SecurityConfig.buildAllowlists(hosts, ports)
 
@@ -107,9 +108,6 @@ fun Application.installLocalhostSecurity(
     }
 
     intercept(ApplicationCallPipeline.ApplicationPhase.Plugins) {
-        // CORS preflight must pass through without auth so legitimate browsers work.
-        if (call.request.httpMethod == HttpMethod.Options) return@intercept
-
         // 1. Host-header allowlist — primary anti-DNS-rebinding control.
         val host = call.request.headers[HttpHeaders.Host]
         if (host == null || host !in allowedHosts) {
@@ -133,12 +131,17 @@ fun Application.installLocalhostSecurity(
         }
 
         // 3. Token — required on everything except explicitly exempt paths.
-        //    A back-channel POST may instead present a live session id (see the
-        //    isAuthenticatedSession KDoc: a capability derived from an authenticated stream).
-        val backChannelSession = call.request.queryParameters["sessionId"]
-            ?.takeIf { call.request.httpMethod == HttpMethod.Post && isAuthenticatedSession(it) }
+        //    A genuine CORS preflight is the ONE exception: by definition it carries no
+        //    Authorization header or cookies (it is the request asking whether those may be sent),
+        //    so it cannot present a token. It is exempted only AFTER the Host and Origin checks
+        //    above have run, and only when it really is a preflight — a bare OPTIONS with no
+        //    Access-Control-Request-Method is treated as an ordinary request and still needs a
+        //    token. Previously ALL OPTIONS requests short-circuited this interceptor before any
+        //    check, which let an unauthenticated, Host-rebound OPTIONS open an SSE stream.
+        val isCorsPreflight = call.request.httpMethod == HttpMethod.Options &&
+            call.request.headers.contains(HttpHeaders.AccessControlRequestMethod)
 
-        if (backChannelSession == null && call.request.path() !in tokenExemptPaths) {
+        if (!isCorsPreflight && call.request.path() !in tokenExemptPaths) {
             val provided = call.request.headers[HttpHeaders.Authorization]
                 ?.removePrefix("Bearer ")?.trim()
                 ?: call.request.cookies["mcp_token"]

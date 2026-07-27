@@ -150,14 +150,8 @@ class McpServerManager(
         scope.launch {
             try {
                 val server = embeddedServer(CIO, port = port, host = bindHost) {
-                    // Declared before the security install so a back-channel POST can be
-                    // authenticated by its live session id when a client's URL resolver drops the
-                    // path-borne token (issue #11).
+                    installLocalhostSecurity(authToken, listOf(port), allowedSecurityHosts())
                     val sessions = ConcurrentHashMap<String, SseServerTransport>()
-                    installLocalhostSecurity(
-                        authToken, listOf(port), allowedSecurityHosts(),
-                        isAuthenticatedSession = { sessions.containsKey(it) }
-                    )
                     // Hand-rolled equivalent of the SDK's `mcp(serverFactory())` so we OWN each
                     // per-session SseServerTransport AND the SSE GET coroutine's Job — the SDK's
                     // mcp() builds the transport internally and hands us no handle. Route shape is
@@ -169,8 +163,14 @@ class McpServerManager(
                     // http://host:port/<token> and http://host:port/<token>/ connect (issue #11).
                     install(IgnoreTrailingSlash)
                     routing {
+                        // NOTE: every SSE mount is wrapped in an explicit GET selector. Ktor's
+                        // no-path `sse { }` overload registers a bare handler with NO HttpMethod
+                        // selector, so it answers ANY verb — which combined with the old
+                        // OPTIONS-skips-everything rule let an unauthenticated request open a
+                        // stream and harvest a session id. Never drop the `method(Get)` wrapper.
+
                         // Root endpoint: clients that can send an Authorization header (or cookie).
-                        sse { serveMcpSse(sessions) }
+                        method(HttpMethod.Get) { sse { serveMcpSse(sessions) } }
                         post { handleMcpPost(sessions) }
 
                         // Path-token endpoint (issue #11): the SDK advertises its POST back-channel
@@ -179,7 +179,7 @@ class McpServerManager(
                         // onto the POST while "?token=" is dropped (401). This is the only way a
                         // client that cannot set headers can complete an MCP session.
                         route("/{token}") {
-                            sse { serveMcpSse(sessions) }
+                            method(HttpMethod.Get) { sse { serveMcpSse(sessions) } }
                             post { handleMcpPost(sessions) }
                         }
                     }

@@ -40,10 +40,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   RFC 2396 `URI.resolve` drops the final segment without it (an mcp-proxy would then `401`).
   The token stays **mandatory** — it is the only control stopping any local process from driving
   Burp; the header form remains preferred where supported, since a URL-borne token is more exposed.
-- A back-channel `POST ?sessionId=…` may also authenticate with its **live session id** — a 122-bit
-  random UUID the server discloses only over an already token-authenticated SSE stream, so it is a
-  capability derived from the token, not a bypass. This keeps the back-channel working when a
-  client's URL resolver mangles the path.
+### Security
+- **Unauthenticated `OPTIONS` could open an MCP SSE stream and disclose a live session id.** Two
+  long-standing defects combined: the auth interceptor short-circuited on `OPTIONS` **before** the
+  Host allowlist, the Origin lockdown *and* the token check; and Ktor's no-path `sse { }` overload
+  registers a handler with **no HTTP-method selector**, so the SSE endpoint answered every verb.
+  `OPTIONS / HTTP/1.1` with a rebound `Host:` and zero credentials therefore returned `200` plus
+  `event: endpoint / data: ?sessionId=<uuid>` (reproduced against a running instance).
+
+  Fixed by enforcing Host + Origin on **every** method and exempting only a *genuine* CORS preflight
+  (`OPTIONS` **with** `Access-Control-Request-Method`) from the token check — a bare `OPTIONS` is now
+  an ordinary request that needs a token — and by mounting every SSE route behind an explicit
+  `method(HttpMethod.Get)` selector. Covered by 10 raw-socket regression tests
+  (`SecurityInterceptorTest`).
+
+  On the released 2.3.x line the leaked id was **inert** (the back-channel still demanded the token),
+  so no shipped version was exploitable; the session-id auth carrier that would have made it
+  exploitable was added and removed within this unreleased 2.4.0 line, found by an adversarial review
+  of the issue-#11 change before release. **A session id is deliberately not an authentication
+  carrier**, so no future leak of one can become a token bypass.
 
 ### Fixed
 - **`collaborator_generate_payload` crash on long/decorated custom data** — Montoya's
