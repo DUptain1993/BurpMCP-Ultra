@@ -26,6 +26,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   per-message WebSocket authz, gateway trusted-header forgery, second-order/async IDOR, cache-key
   mixing, cross-protocol object diffing).
 
+### Added
+- **Token-in-path auth for MCP clients that cannot set headers (issue #11).** The SSE endpoint is
+  now also mounted at `http://host:port/<token>/`, so a client that accepts only a URL can connect
+  with **no `headers` block at all**. The Server tab gained a **"Copy No-Headers Config"** button
+  and the dashboard shows the same form.
+
+  This is a real interop fix, not a convenience: such clients previously had **no working
+  configuration**. The documented `?token=…` alternative only half-worked — it authenticated the
+  SSE `GET`, then every message `401`'d, because the SDK advertises its back-channel as the
+  relative reference `?sessionId=…`, which per RFC 3986 §5.3 **replaces the query but preserves the
+  path**. The token therefore has to ride in the path to survive. Keep the trailing slash: Java's
+  RFC 2396 `URI.resolve` drops the final segment without it (an mcp-proxy would then `401`).
+  The token stays **mandatory** — it is the only control stopping any local process from driving
+  Burp; the header form remains preferred where supported, since a URL-borne token is more exposed.
+- A back-channel `POST ?sessionId=…` may also authenticate with its **live session id** — a 122-bit
+  random UUID the server discloses only over an already token-authenticated SSE stream, so it is a
+  capability derived from the token, not a bypass. This keeps the back-channel working when a
+  client's URL resolver mangles the path.
+
 ### Fixed
 - **`collaborator_generate_payload` crash on long/decorated custom data** — Montoya's
   `CollaboratorClient.generatePayload(customData)` rejects any label longer than 16 chars or

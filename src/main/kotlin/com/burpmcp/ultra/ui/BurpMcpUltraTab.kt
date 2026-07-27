@@ -914,6 +914,7 @@ class BurpMcpUltraTab(
     private lateinit var serverSecondaryUrlLabel: JLabel
     private lateinit var serverDashboardUrlLabel: JLabel
     private lateinit var serverConfigArea: JTextArea
+    private lateinit var serverPathConfigArea: JTextArea
 
     private fun buildServerTab(): JPanel {
         val panel = JPanel(BorderLayout(0, 0))
@@ -1004,6 +1005,7 @@ class BurpMcpUltraTab(
                     serverSecondaryUrlLabel.text = ConnectionInfo.secondarySseUrlForHost(outcome.effectiveHost)
                     serverDashboardUrlLabel.text = ConnectionInfo.dashboardUrlForHost(outcome.effectiveHost)
                     serverConfigArea.text = ConnectionInfo.clientConfigJson(authToken, host = outcome.effectiveHost)
+                    serverPathConfigArea.text = ConnectionInfo.clientConfigJsonPathToken(authToken, host = outcome.effectiveHost)
                     val msg = buildString {
                         append(
                             if (outcome.boundOk) "Rebound live to ${outcome.effectiveHost} — no reload needed."
@@ -1042,23 +1044,46 @@ class BurpMcpUltraTab(
         content.add(copyConfigBtn, gbc)
         gbc.gridwidth = 1
 
+        // Header-less clients (GitHub issue #11): some MCP clients accept only a URL and cannot
+        // send an Authorization header. The token rides in the URL PATH — the only URL-borne
+        // carrier that survives onto the SSE back-channel POST (a "?token=" query is dropped).
         gbc.gridy = 13; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(
+            JLabel("If your MCP client cannot set headers — token in the URL path (keep the trailing slash):")
+                .apply { font = font.deriveFont(Font.ITALIC, 11f) },
+            gbc
+        )
+        gbc.gridwidth = 1
+
+        serverPathConfigArea = JTextArea(ConnectionInfo.clientConfigJsonPathToken(authToken, host = bindHost))
+        val pathConfigArea = serverPathConfigArea
+        pathConfigArea.isEditable = false; pathConfigArea.font = Font("Monospaced", Font.PLAIN, 11)
+        pathConfigArea.lineWrap = true; pathConfigArea.wrapStyleWord = false; pathConfigArea.rows = 3
+        gbc.gridy = 14; gbc.gridx = 0; gbc.gridwidth = 2
+        content.add(pathConfigArea, gbc)
+        val copyPathConfigBtn = JButton("Copy No-Headers Config")
+        copyPathConfigBtn.addActionListener { copyToClipboard(pathConfigArea.text) }
+        gbc.gridy = 15; gbc.gridx = 0; gbc.gridwidth = 1; gbc.weightx = 0.0
+        content.add(copyPathConfigBtn, gbc)
+        gbc.gridwidth = 1
+
+        gbc.gridy = 16; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JSeparator(), gbc); gbc.gridwidth = 1
 
         // Live stats
-        gbc.gridy = 14; gbc.gridx = 0; gbc.gridwidth = 2
+        gbc.gridy = 17; gbc.gridx = 0; gbc.gridwidth = 2
         content.add(JLabel("Live Statistics").apply { font = font.deriveFont(Font.BOLD, 14f) }, gbc)
         gbc.gridwidth = 1
 
-        serverUptimeLabel = JLabel("00:00:00"); addRow(15, "Uptime:", serverUptimeLabel)
-        serverToolCallsLabel = JLabel("0"); addRow(16, "Total MCP Tool Calls:", serverToolCallsLabel)
-        serverEventsLabel = JLabel("0"); addRow(17, "Event Buffer:", serverEventsLabel)
-        serverWsLabel = JLabel("0"); addRow(18, "WebSocket Connections:", serverWsLabel)
-        serverCollabLabel = JLabel("0"); addRow(19, "Collaborator Clients:", serverCollabLabel)
-        serverScanLabel = JLabel("0"); addRow(20, "Active Scan Tasks:", serverScanLabel)
+        serverUptimeLabel = JLabel("00:00:00"); addRow(18, "Uptime:", serverUptimeLabel)
+        serverToolCallsLabel = JLabel("0"); addRow(19, "Total MCP Tool Calls:", serverToolCallsLabel)
+        serverEventsLabel = JLabel("0"); addRow(20, "Event Buffer:", serverEventsLabel)
+        serverWsLabel = JLabel("0"); addRow(21, "WebSocket Connections:", serverWsLabel)
+        serverCollabLabel = JLabel("0"); addRow(22, "Collaborator Clients:", serverCollabLabel)
+        serverScanLabel = JLabel("0"); addRow(23, "Active Scan Tasks:", serverScanLabel)
 
         // Filler
-        gbc.gridy = 21; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
+        gbc.gridy = 24; gbc.gridx = 0; gbc.weighty = 1.0; gbc.gridwidth = 2
         content.add(JLabel(), gbc)
 
         panel.add(JScrollPane(content), BorderLayout.CENTER)

@@ -200,6 +200,9 @@ class DashboardServer(
             .replace("__DASHBOARD_PROXY_HISTORY_URL__", "${ConnectionInfo.dashboardUrlForHost(bindHost)}/api/proxy/recent?limit=50")
             .replace("__DASHBOARD_URL__", ConnectionInfo.dashboardUrlForHost(bindHost))
             .replace("__MCP_CLIENT_CONFIG__", ConnectionInfo.clientConfigJson(null, host = bindHost))
+            // Placeholder token only — never the real one, so the browser-served page stays safe
+            // to read (the dashboard authenticates with an HttpOnly cookie instead).
+            .replace("__MCP_CLIENT_CONFIG_PATH__", ConnectionInfo.clientConfigJsonPathToken(null, host = bindHost))
     }
 
     /**
@@ -477,6 +480,7 @@ body{font-family:var(--font);background:var(--bg-primary);color:var(--text-prima
         <div class="conn-card"><h4>Dashboard</h4><div class="url">__DASHBOARD_URL__</div></div>
         <div class="conn-card"><h4>Dashboard API - Proxy History</h4><div class="url">__DASHBOARD_PROXY_HISTORY_URL__</div></div>
         <div class="conn-card"><h4>MCP Client Config — replace token from the Server tab</h4><div class="url" style="font-size:11px;">__MCP_CLIENT_CONFIG__</div></div>
+        <div class="conn-card"><h4>MCP Client Config — client can't set headers (token in path, keep the trailing slash)</h4><div class="url" style="font-size:11px;">__MCP_CLIENT_CONFIG_PATH__</div></div>
     </div>
 </div>
 

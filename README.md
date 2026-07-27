@@ -98,10 +98,22 @@ see [Building from Source](#building-from-source). Pre-built JARs are on the
 Add to `~/.claude.json` or your project's `.mcp.json`.
 
 > ⚠️ **The token is required, and the endpoint is the root path `/` — not `/sse`.**
-> Copy the token from the **Server** tab of the BurpMCP-Ultra panel in Burp (it is also
-> accepted as a `?token=…` query parameter or an `mcp_token` cookie). Without it the
+> Copy the token from the **Server** tab of the BurpMCP-Ultra panel in Burp. Without it the
 > server returns `401`, and clients like Claude Code then fall back to OAuth discovery and
 > fail with `SDK auth failed: HTTP 404: Invalid OAuth error response`.
+
+> 💡 **MCP client can't set headers?** Use the token-in-path URL — no `headers` block needed
+> (GitHub issue #11). Copy it with **"Copy No-Headers Config"** on the Server tab:
+>
+> ```json
+> { "mcpServers": { "burp": { "type": "sse", "url": "http://127.0.0.1:9876/PASTE_TOKEN_FROM_SERVER_TAB/" } } }
+> ```
+>
+> **Keep the trailing slash** — it is what makes the token survive onto the SSE back-channel.
+> A `?token=…` query does **not** work for MCP: the SDK advertises its POST endpoint as the
+> relative reference `?sessionId=…`, which per RFC 3986 §5.3 replaces the query (so the token is
+> dropped and every message `401`s) while preserving the path. Note the token becomes part of the
+> URL, so prefer the header form when your client supports it.
 
 ### 4. Open Dashboard
 
@@ -375,7 +387,10 @@ governed by **operator-only** controls the agent cannot change.
 - **Host-header allowlist** — defeats DNS rebinding.
 - **Origin lockdown** — rejects cross-origin browser requests; CORS only advertises loopback.
 - **Per-session token** — required on every request (`Authorization: Bearer`, `mcp_token`
-  cookie, or `?token=`). The dashboard uses an `HttpOnly` cookie, so the token never lives in a URL.
+  cookie, `?token=`, or the first URL **path** segment `/<token>/` for header-less MCP clients).
+  The dashboard uses an `HttpOnly` cookie, so the token never lives in a URL there. A back-channel
+  `POST ?sessionId=…` may instead present a live session id — a 122-bit capability the server
+  discloses only over an already-authenticated stream, never a bypass.
 
 **Operator governance** (configured in Burp, not via MCP)
 - `mcp_scope_mode` — `off` / `warn` / `enforce`. Every live-request tool passes through a
@@ -418,8 +433,9 @@ Open **http://127.0.0.1:9878** for the real-time dashboard:
   }
 }
 ```
-The token comes from the **Server** tab. The endpoint is the root path `/` (not `/sse`); the
-token may instead be passed as `?token=…` or an `mcp_token` cookie. Config locations:
+The token comes from the **Server** tab. The endpoint is the root path `/` (not `/sse`). If your
+client cannot set headers, drop the `headers` block and put the token in the path instead —
+`"url": "http://127.0.0.1:9876/<token>/"` (keep the trailing slash). Config locations:
 `~/.claude.json` (global) or `.mcp.json` (per-project).
 
 </details>

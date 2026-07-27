@@ -7,7 +7,13 @@ package com.burpmcp.ultra.core
  *
  * Two invariants this guards, both of which previously broke clients (GitHub issue #1):
  *  1. The MCP SSE endpoint is the **root path `/`**, NOT `/sse`.
- *  2. A **bearer token is required** on every request.
+ *  2. A **token is required** on every request.
+ *
+ * The token may ride in an `Authorization: Bearer` header OR in the URL **path**
+ * (`http://host:port/<token>/`). The path form exists for MCP clients that cannot set custom
+ * headers (GitHub issue #11) — and it is the only URL-borne carrier that works, because the SDK
+ * advertises its POST back-channel as the relative reference `?sessionId=...`, which per
+ * RFC 3986 §5.3 replaces a `?token=` query but preserves the path.
  */
 object ConnectionInfo {
     const val PRIMARY_PORT = 9876
@@ -39,5 +45,24 @@ object ConnectionInfo {
     fun clientConfigJson(token: String?, port: Int = PRIMARY_PORT, host: String = "127.0.0.1"): String {
         val bearer = token ?: TOKEN_PLACEHOLDER
         return """{"mcpServers":{"burp":{"type":"sse","url":"${sseUrl(port, host)}","headers":{"Authorization":"Bearer $bearer"}}}}"""
+    }
+
+    /**
+     * The SSE endpoint with the token embedded in the **path** — for MCP clients that accept only a
+     * URL and cannot set headers (GitHub issue #11).
+     *
+     * Note the token becomes part of the URL, so it can land in shell history or a client's config
+     * file. Prefer [clientConfigJson] (header) when the client supports headers.
+     */
+    fun sseUrlWithPathToken(token: String, port: Int = PRIMARY_PORT, host: String = "127.0.0.1"): String =
+        "http://$host:$port/$token/"
+
+    /**
+     * A ready-to-paste MCP client config for a **header-less** client: no `headers` block at all,
+     * the token rides in the URL path. Same [token] handling contract as [clientConfigJson].
+     */
+    fun clientConfigJsonPathToken(token: String?, port: Int = PRIMARY_PORT, host: String = "127.0.0.1"): String {
+        val t = token ?: TOKEN_PLACEHOLDER
+        return """{"mcpServers":{"burp":{"type":"sse","url":"${sseUrlWithPathToken(t, port, host)}"}}}"""
     }
 }

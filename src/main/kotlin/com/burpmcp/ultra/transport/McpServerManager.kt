@@ -150,7 +150,14 @@ class McpServerManager(
         scope.launch {
             try {
                 val server = embeddedServer(CIO, port = port, host = bindHost) {
-                    installLocalhostSecurity(authToken, listOf(port), allowedSecurityHosts())
+                    // Declared before the security install so a back-channel POST can be
+                    // authenticated by its live session id when a client's URL resolver drops the
+                    // path-borne token (issue #11).
+                    val sessions = ConcurrentHashMap<String, SseServerTransport>()
+                    installLocalhostSecurity(
+                        authToken, listOf(port), allowedSecurityHosts(),
+                        isAuthenticatedSession = { sessions.containsKey(it) }
+                    )
                     // Hand-rolled equivalent of the SDK's `mcp(serverFactory())` so we OWN each
                     // per-session SseServerTransport AND the SSE GET coroutine's Job — the SDK's
                     // mcp() builds the transport internally and hands us no handle. Route shape is
@@ -158,23 +165,22 @@ class McpServerManager(
                     // The wrapped transport bounds send() (TimeoutSseTransport); the raw transport
                     // is registered for the POST path. See docs/BUG-sse-backpressure-hang.md.
                     install(SSE)
-                    val sessions = ConcurrentHashMap<String, SseServerTransport>()
+                    // Accept the URL with or without a trailing slash, so both
+                    // http://host:port/<token> and http://host:port/<token>/ connect (issue #11).
+                    install(IgnoreTrailingSlash)
                     routing {
-                        sse {
-                            val raw = SseServerTransport("", this)
-                            val tx = TimeoutSseTransport(raw, coroutineContext.job, sendTimeoutMs, logging)
-                            val mcpServer = createMcpServer()
-                            sessions[raw.sessionId] = raw
-                            mcpServer.onClose { sessions.remove(raw.sessionId) }
-                            mcpServer.connect(tx)        // responses flow through the bounded send
-                            awaitCancellation()          // keep the SSE stream open until torn down
-                        }
-                        post {
-                            val sid = call.request.queryParameters["sessionId"]
-                                ?: return@post call.respond(HttpStatusCode.BadRequest, "sessionId query parameter is not provided")
-                            val raw = sessions[sid]
-                                ?: return@post call.respond(HttpStatusCode.NotFound, "Session not found")
-                            raw.handlePostMessage(call)  // routes onMessage -> server -> tx.send (bounded)
+                        // Root endpoint: clients that can send an Authorization header (or cookie).
+                        sse { serveMcpSse(sessions) }
+                        post { handleMcpPost(sessions) }
+
+                        // Path-token endpoint (issue #11): the SDK advertises its POST back-channel
+                        // as the relative reference "?sessionId=...", which per RFC 3986 §5.3 keeps
+                        // the base PATH but replaces the query — so a token in the path survives
+                        // onto the POST while "?token=" is dropped (401). This is the only way a
+                        // client that cannot set headers can complete an MCP session.
+                        route("/{token}") {
+                            sse { serveMcpSse(sessions) }
+                            post { handleMcpPost(sessions) }
                         }
                     }
                 }
@@ -195,6 +201,34 @@ class McpServerManager(
                 logging.logToError("BurpMCP-Ultra: Stack trace: ${e.stackTraceToString()}")
             }
         }
+    }
+
+    /**
+     * Serves one MCP SSE session. Registered at BOTH the root path and the `/{token}` path so a
+     * client authenticating via header/cookie and a client authenticating via a path-borne token
+     * get byte-identical behaviour (issue #11).
+     *
+     * The advertised POST endpoint is deliberately the relative reference `?sessionId=...`: the
+     * client resolves it against whichever URL it connected to, which preserves a path-borne token
+     * (RFC 3986 §5.3) without ever echoing the token back over the wire.
+     */
+    private suspend fun ServerSSESession.serveMcpSse(sessions: ConcurrentHashMap<String, SseServerTransport>) {
+        val raw = SseServerTransport("", this)
+        val tx = TimeoutSseTransport(raw, coroutineContext.job, sendTimeoutMs, logging)
+        val mcpServer = createMcpServer()
+        sessions[raw.sessionId] = raw
+        mcpServer.onClose { sessions.remove(raw.sessionId) }
+        mcpServer.connect(tx)        // responses flow through the bounded send
+        awaitCancellation()          // keep the SSE stream open until torn down
+    }
+
+    /** Routes one back-channel POST into its SSE session (`onMessage` -> server -> bounded `tx.send`). */
+    private suspend fun RoutingContext.handleMcpPost(sessions: ConcurrentHashMap<String, SseServerTransport>) {
+        val sid = call.request.queryParameters["sessionId"]
+            ?: return call.respond(HttpStatusCode.BadRequest, "sessionId query parameter is not provided")
+        val raw = sessions[sid]
+            ?: return call.respond(HttpStatusCode.NotFound, "Session not found")
+        raw.handlePostMessage(call)
     }
 
     /**

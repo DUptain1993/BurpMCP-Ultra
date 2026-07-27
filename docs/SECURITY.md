@@ -18,8 +18,20 @@ transport controls are always installed together (`SecurityConfig`):
    allowlist and is rejected before any handler runs.
 2. **Origin lockdown** — cross-origin browser requests are rejected; CORS only ever advertises the
    configured host origins, never `anyHost()`.
-3. **Per-session bearer token** — required on every request (Authorization header, `mcp_token`
-   cookie, or `?token=`). Surfaced only in the local Burp UI (Server tab), never in logs.
+3. **Per-session token** — required on every request. Accepted as an `Authorization: Bearer`
+   header, an `mcp_token` cookie, a `?token=` query param, or the first URL **path** segment
+   (`/<token>/`). Surfaced only in the local Burp UI (Server tab), never in logs.
+
+   The path carrier exists because MCP clients that cannot set headers otherwise have no working
+   configuration (issue #11): the SDK advertises its back-channel as the relative reference
+   `?sessionId=…`, which per RFC 3986 §5.3 replaces a `?token=` query but preserves the path.
+   A token in a URL is more exposed than one in a header (shell history, client config files), so
+   prefer the header form when the client supports it.
+
+   A back-channel `POST ?sessionId=…` may alternatively present a **live session id**. That id is
+   a 122-bit random UUID disclosed only over an already token-authenticated SSE stream, so it is a
+   capability derived from the token rather than a way around it; it cannot be guessed, and the
+   Host/Origin controls above still block any browser-originated attempt to use one.
 
 ## Operator-only gates
 
