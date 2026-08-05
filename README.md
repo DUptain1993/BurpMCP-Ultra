@@ -383,6 +383,11 @@ BurpMCP-Ultra runs three local servers (SSE `9876`/`9877`, dashboard `9878`). Bi
 `127.0.0.1` is **not** a trust boundary, so the transport is hardened and offensive tools are
 governed by **operator-only** controls the agent cannot change.
 
+> **Port already in use?** PortSwigger's own **MCP Server** extension also defaults to **9876**, so
+> running both at once clashes. Move this extension with the `mcp_sse_port` / `mcp_http_port` /
+> `mcp_dashboard_port` preferences (or `-Dburpmcp.ssePort=…`), then reload. On a clash the
+> extension now says so explicitly in the Errors tab — it is *not* the JDK-version problem.
+
 **Transport hardening**
 - **Host-header allowlist** — defeats DNS rebinding.
 - **Origin lockdown** — rejects cross-origin browser requests; CORS only advertises loopback.

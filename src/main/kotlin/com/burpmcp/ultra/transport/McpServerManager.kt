@@ -149,6 +149,18 @@ class McpServerManager(
     ) {
         scope.launch {
             try {
+                // Pre-flight: if the port is already taken, say so plainly. The old failure text
+                // blamed the build JDK, which is the wrong lead when the real cause is a clash with
+                // PortSwigger's own MCP Server extension (same default port). See PortPolicy.
+                if (portInUse(port)) {
+                    logging.logToError(
+                        PortPolicy.conflictMessage(
+                            label, bindHost, port,
+                            if (port == ssePort) PortPolicy.PREF_SSE_PORT else PortPolicy.PREF_HTTP_PORT
+                        )
+                    )
+                    return@launch
+                }
                 val server = embeddedServer(CIO, port = port, host = bindHost) {
                     installLocalhostSecurity(authToken, listOf(port), allowedSecurityHosts())
                     val sessions = ConcurrentHashMap<String, SseServerTransport>()
@@ -191,6 +203,12 @@ class McpServerManager(
                     logging.logToOutput("BurpMCP-Ultra: $label transport listening on http://$bindHost:$port (MCP SSE endpoint is the root path '/', not '/sse')")
                 } else {
                     logging.logToError(
+                        if (portInUse(port))
+                            PortPolicy.conflictMessage(
+                                label, bindHost, port,
+                                if (port == ssePort) PortPolicy.PREF_SSE_PORT else PortPolicy.PREF_HTTP_PORT
+                            )
+                        else
                         "BurpMCP-Ultra: $label transport reported start() but $bindHost:$port is NOT listening. " +
                             "This is the GitHub issue #2/#3 symptom — almost always a JAR built with Java 22+ " +
                             "(Kotlin/Ktor/MCP-SDK incompatibility). Rebuild with a JDK 17-21 (NOT Burp's bundled Java 25)."
@@ -201,6 +219,20 @@ class McpServerManager(
                 logging.logToError("BurpMCP-Ultra: Stack trace: ${e.stackTraceToString()}")
             }
         }
+    }
+
+    /**
+     * True when something is already listening on [port], i.e. our bind is going to fail. A
+     * wildcard bind is not connectable at its own address, so the probe is redirected to loopback
+     * exactly as [verifyListening] does.
+     */
+    private fun portInUse(port: Int): Boolean = try {
+        java.net.Socket().use {
+            it.connect(java.net.InetSocketAddress(BindHostPolicy.probeHost(bindHost), port), 300)
+        }
+        true
+    } catch (_: Exception) {
+        false
     }
 
     /**

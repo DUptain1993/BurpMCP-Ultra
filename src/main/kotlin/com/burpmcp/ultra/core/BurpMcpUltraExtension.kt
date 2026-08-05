@@ -7,6 +7,7 @@ import com.burpmcp.ultra.transport.AuditLog
 import com.burpmcp.ultra.transport.BindHostPolicy
 import com.burpmcp.ultra.transport.McpServerManager
 import com.burpmcp.ultra.transport.DashboardServer
+import com.burpmcp.ultra.transport.PortPolicy
 import com.burpmcp.ultra.transport.SecurityConfig
 import com.burpmcp.ultra.events.EventBus
 import com.burpmcp.ultra.state.StateManager
@@ -101,17 +102,29 @@ class BurpMcpUltraExtension : BurpExtension {
         // later init step throws we must stop them (see the early unload handler above) — otherwise
         // the partially-initialized instance orphans its listeners and the next reload fails with
         // "Address already in use".
+        // Configurable ports, resolved on the same ladder as the bind host (system property, then
+        // preference, then default). PortSwigger's own "MCP Server" extension also defaults to
+        // 9876, so an operator running both needs a way out of the clash. See PortPolicy.
+        fun port(sysProp: String, prefKey: String, default: Int): Int = PortPolicy.resolve(
+            System.getProperty(sysProp),
+            try { prefs.getString(prefKey) } catch (_: Exception) { null },
+            default
+        )
+        val ssePort = port("burpmcp.ssePort", PortPolicy.PREF_SSE_PORT, PortPolicy.DEFAULT_SSE)
+        val httpPort = port("burpmcp.httpPort", PortPolicy.PREF_HTTP_PORT, PortPolicy.DEFAULT_HTTP)
+        val dashboardPort = port("burpmcp.dashboardPort", PortPolicy.PREF_DASHBOARD_PORT, PortPolicy.DEFAULT_DASHBOARD)
+
         serverManager = McpServerManager(
             bridges = bridges,
             eventBus = eventBus,
             stateManager = stateManager,
             authToken = authToken,
             bindHost = bindHost,
-            ssePort = 9876,
-            httpPort = 9877,
+            ssePort = ssePort,
+            httpPort = httpPort,
             logging = api.logging()
         )
-        dashboardServer = DashboardServer(bridges, eventBus, stateManager, authToken, bindHost, 9878, api.logging())
+        dashboardServer = DashboardServer(bridges, eventBus, stateManager, authToken, bindHost, dashboardPort, api.logging())
         try {
             serverManager.start()
             dashboardServer.start()

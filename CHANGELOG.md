@@ -6,7 +6,24 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 
 ## [2.4.0] — Unreleased
 
+### Added
+- **Configurable listening ports.** `mcp_sse_port` / `mcp_http_port` / `mcp_dashboard_port`
+  (or `-Dburpmcp.ssePort` / `.httpPort` / `.dashboardPort`), resolved on the same ladder as the bind
+  host: system property, else preference, else the 9876/9877/9878 defaults. An unparseable or
+  out-of-range value falls back instead of failing startup.
+
+  This exists because **PortSwigger's own "MCP Server" extension also defaults to 9876**: anyone
+  running both extensions had an unavoidable clash and no way out of it.
+
 ### Fixed
+- **A port clash was reported as the wrong problem.** When 9876 was already taken, the only message
+  said the transport "reported start() but is NOT listening… almost always a JAR built with Java
+  22+" — sending operators to rebuild their JAR when the real cause was another process (very
+  plausibly PortSwigger's MCP Server extension) holding the port. The likely story behind issue #9.
+  Startup now pre-checks the port and, on a clash, says plainly that it is **already in use**, that
+  this is **not** the Java-version problem, names the official MCP Server extension when the port is
+  its 9876 default, suggests a full Burp restart for an orphaned socket, offers `ss -ltnp | grep
+  <port>` to find the owner, and names the preference that moves the port. (**+9 tests**)
 - **`proxy_history` could return JSON that no strict parser could read** (issue #12, reported with a
   full diagnosis by **@th0t3p**). With `include_response=true` the raw response was string-converted
   straight into the JSON. For a binary body — a webfont, image, archive — that yields an **unpaired
