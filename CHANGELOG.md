@@ -6,6 +6,20 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 
 ## [2.4.0] — Unreleased
 
+### Fixed (community contribution)
+- **`sitemap_add_issue` / `scanner_create_issue` threw a `NullPointerException` whenever
+  request/response evidence was attached** (PR #13, reported, diagnosed and fixed by
+  **@aconstantinou-cmd**, verified live on Burp Suite Professional 2026.7.1). The evidence
+  `HttpRequest` was built with **no `HttpService`**, so Montoya had no host to resolve when filing
+  the issue into the site map — surfacing as `Cannot invoke "burp.Zp42.hashCode()" because the
+  return value of "burp.Zrio.ZWy()" is null`. Host/port/TLS are now derived from the issue's own
+  `url` and attached, matching the pattern already used by `addRequestToTask`.
+
+  Follow-up hardening on merge: the derivation was duplicated in both bridges with the two copies
+  disagreeing on how a malformed URL was reported, so it now lives once in `ServiceParts.fromUrl`
+  (**+11 tests**) and fails identically everywhere — an unparseable or host-less URL yields an
+  actionable message instead of a raw `URISyntaxException`.
+
 ### Added
 - **`idor_hunt` — horizontal object-id IDOR with canary confirmation (tool #150).**
   The object-id swap that `auth_diff` / `access_control_sweep` deliberately do not do: those

@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.core.ServiceParts
 import com.burpmcp.ultra.safety.BoundedHttp
 import burp.api.montoya.scanner.AuditConfiguration
 import burp.api.montoya.scanner.AuditResult
@@ -547,15 +548,10 @@ class ScannerBridge(
             // attached only when both request and response are supplied.
             var requestResponse: HttpRequestResponse? = null
             if (request != null && response != null) {
-                // Same fix as SitemapBridge.addIssue: a request built without an HttpService
-                // has no host to resolve, which NPEs inside the Montoya API once the issue is
-                // filed into the site map. Derive host/port/TLS from the issue's `url` param.
-                val parsedUrl = java.net.URI(url)
-                val useTls = parsedUrl.scheme?.lowercase() != "http"
-                val host = parsedUrl.host
-                    ?: throw IllegalArgumentException("Could not parse host from url: $url")
-                val port = if (parsedUrl.port != -1) parsedUrl.port else if (useTls) 443 else 80
-                val httpService = HttpService.httpService(host, port, useTls)
+                // A request built without an HttpService has no host to resolve, which NPEs
+                // inside the Montoya API once the issue is filed into the site map (PR #13).
+                val parts = ServiceParts.fromUrl(url)
+                val httpService = HttpService.httpService(parts.host, parts.port, parts.useTls)
 
                 val reqBytes = decodeMessagePayload(request)
                 val httpRequest = HttpRequest.httpRequest(BurpByteArray.byteArray(*reqBytes)).withService(httpService)
