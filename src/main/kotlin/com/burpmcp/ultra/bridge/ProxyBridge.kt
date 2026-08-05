@@ -1,6 +1,7 @@
 package com.burpmcp.ultra.bridge
 
 import burp.api.montoya.MontoyaApi
+import com.burpmcp.ultra.core.BodyText
 import com.burpmcp.ultra.core.ProxyHistorySearch
 import com.burpmcp.ultra.core.StatusCodeRange
 import com.burpmcp.ultra.core.HighlightColorName
@@ -786,25 +787,29 @@ class ProxyBridge(
                 })
             } catch (_: Exception) { }
 
-            // Full request text
+            // Full request text. Routed through BodyText so a binary body (a file upload) can
+            // never put an unencodable lone surrogate into the JSON — see issue #12.
             if (includeRequest) {
                 try {
-                    put("request", item.request().toString())
+                    val r = BodyText.render(item.request().toString(), maxResponseLength, label = "request body")
+                    put("request", r.text)
+                    if (r.binary) put("request_binary", true)
+                    if (r.truncated) put("request_truncated", true)
                 } catch (_: Exception) {
                     put("request", "")
                 }
             }
 
-            // Full response text
+            // Full response text. A binary body (font/image/archive) is replaced by a placeholder
+            // rather than string-converted: doing the latter corrupted the WHOLE batch's JSON for
+            // the client, not just this item (issue #12).
             if (includeResponse && item.hasResponse()) {
                 try {
-                    val respStr = item.response().toString()
-                    val responseText = if (maxResponseLength != null && maxResponseLength > 0 && respStr.length > maxResponseLength) {
-                        respStr.take(maxResponseLength) + "... [truncated, full length: ${respStr.length}]"
-                    } else {
-                        respStr
-                    }
-                    put("response", responseText)
+                    val mime = try { item.response().mimeType().name } catch (_: Exception) { null }
+                    val r = BodyText.render(item.response().toString(), maxResponseLength, mime, "response body")
+                    put("response", r.text)
+                    if (r.binary) put("response_binary", true)
+                    if (r.truncated) put("response_truncated", true)
                 } catch (_: Exception) {
                     put("response", "")
                 }
@@ -829,7 +834,11 @@ class ProxyBridge(
 
             try {
                 val payload = item.payload()
-                put("payload", payload.toString())
+                // Binary WebSocket frames are the same JSON hazard as binary HTTP bodies (issue #12).
+                val r = BodyText.render(payload.toString(), label = "payload")
+                put("payload", r.text)
+                if (r.binary) put("payload_binary", true)
+                if (r.truncated) put("payload_truncated", true)
                 put("payload_length", payload.length())
             } catch (_: Exception) {
                 put("payload", "")
@@ -839,7 +848,7 @@ class ProxyBridge(
             try {
                 val editedPayload = item.editedPayload()
                 if (editedPayload != null) {
-                    put("edited_payload", editedPayload.toString())
+                    put("edited_payload", BodyText.render(editedPayload.toString(), label = "payload").text)
                 }
             } catch (_: Exception) { }
 

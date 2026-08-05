@@ -6,6 +6,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
 
 ## [2.4.0] — Unreleased
 
+### Fixed
+- **`proxy_history` could return JSON that no strict parser could read** (issue #12, reported with a
+  full diagnosis by **@th0t3p**). With `include_response=true` the raw response was string-converted
+  straight into the JSON. For a binary body — a webfont, image, archive — that yields an **unpaired
+  surrogate**, which has *no UTF-8 encoding*, so the encoded stream is corrupt and the client dies
+  with `Unterminated string`. Because one bad item breaks the array around it, **a single binary
+  asset made an entire ~4 MB, 50-item batch unparseable**.
+
+  Bodies now go through `BodyText`: a binary body is replaced by a short placeholder stating its
+  size and MIME type (flagged as `response_binary: true`), and anything emitted as text is stripped
+  of unpaired surrogates and truncated **on a safe boundary** — the old fixed-count `take()` could
+  itself split a surrogate pair and manufacture the very sequence that breaks the stream. Applied to
+  all four affected paths, not just the reported one: history **request** bodies (file uploads),
+  history **response** bodies, and both WebSocket **payload** fields. Control characters are
+  deliberately left alone — a conformant encoder escapes those correctly, and stripping them would
+  corrupt legitimate text. (**+17 tests**)
+
 ### Fixed (community contribution)
 - **`sitemap_add_issue` / `scanner_create_issue` threw a `NullPointerException` whenever
   request/response evidence was attached** (PR #13, reported, diagnosed and fixed by
