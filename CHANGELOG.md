@@ -4,55 +4,10 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
-## [2.4.0] — Unreleased
+## [2.3.0] — 2026-08-05 — IDOR hunting, header-less clients & a 33-bug QA sweep
 
-### Added
-- **Configurable listening ports.** `mcp_sse_port` / `mcp_http_port` / `mcp_dashboard_port`
-  (or `-Dburpmcp.ssePort` / `.httpPort` / `.dashboardPort`), resolved on the same ladder as the bind
-  host: system property, else preference, else the 9876/9877/9878 defaults. An unparseable or
-  out-of-range value falls back instead of failing startup.
-
-  This exists because **PortSwigger's own "MCP Server" extension also defaults to 9876**: anyone
-  running both extensions had an unavoidable clash and no way out of it.
-
-### Fixed
-- **A port clash was reported as the wrong problem.** When 9876 was already taken, the only message
-  said the transport "reported start() but is NOT listening… almost always a JAR built with Java
-  22+" — sending operators to rebuild their JAR when the real cause was another process (very
-  plausibly PortSwigger's MCP Server extension) holding the port. The likely story behind issue #9.
-  Startup now pre-checks the port and, on a clash, says plainly that it is **already in use**, that
-  this is **not** the Java-version problem, names the official MCP Server extension when the port is
-  its 9876 default, suggests a full Burp restart for an orphaned socket, offers `ss -ltnp | grep
-  <port>` to find the owner, and names the preference that moves the port. (**+9 tests**)
-- **`proxy_history` could return JSON that no strict parser could read** (issue #12, reported with a
-  full diagnosis by **@th0t3p**). With `include_response=true` the raw response was string-converted
-  straight into the JSON. For a binary body — a webfont, image, archive — that yields an **unpaired
-  surrogate**, which has *no UTF-8 encoding*, so the encoded stream is corrupt and the client dies
-  with `Unterminated string`. Because one bad item breaks the array around it, **a single binary
-  asset made an entire ~4 MB, 50-item batch unparseable**.
-
-  Bodies now go through `BodyText`: a binary body is replaced by a short placeholder stating its
-  size and MIME type (flagged as `response_binary: true`), and anything emitted as text is stripped
-  of unpaired surrogates and truncated **on a safe boundary** — the old fixed-count `take()` could
-  itself split a surrogate pair and manufacture the very sequence that breaks the stream. Applied to
-  all four affected paths, not just the reported one: history **request** bodies (file uploads),
-  history **response** bodies, and both WebSocket **payload** fields. Control characters are
-  deliberately left alone — a conformant encoder escapes those correctly, and stripping them would
-  corrupt legitimate text. (**+17 tests**)
-
-### Fixed (community contribution)
-- **`sitemap_add_issue` / `scanner_create_issue` threw a `NullPointerException` whenever
-  request/response evidence was attached** (PR #13, reported, diagnosed and fixed by
-  **@aconstantinou-cmd**, verified live on Burp Suite Professional 2026.7.1). The evidence
-  `HttpRequest` was built with **no `HttpService`**, so Montoya had no host to resolve when filing
-  the issue into the site map — surfacing as `Cannot invoke "burp.Zp42.hashCode()" because the
-  return value of "burp.Zrio.ZWy()" is null`. Host/port/TLS are now derived from the issue's own
-  `url` and attached, matching the pattern already used by `addRequestToTask`.
-
-  Follow-up hardening on merge: the derivation was duplicated in both bridges with the two copies
-  disagreeing on how a malformed URL was reported, so it now lives once in `ServiceParts.fromUrl`
-  (**+11 tests**) and fails identically everywhere — an unparseable or host-less URL yields an
-  actionable message instead of a raw `URISyntaxException`.
+Theme: a new IDOR capability, MCP clients that could never connect can now connect, and the backlog
+of tool bugs found by a full live QA sweep. Includes the first community-contributed fix.
 
 ### Added
 - **`idor_hunt` — horizontal object-id IDOR with canary confirmation (tool #150).**
@@ -73,8 +28,6 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   critic gap-fills (HTTP/2 desync as auth-context inheritance, gRPC field-number tampering,
   per-message WebSocket authz, gateway trusted-header forgery, second-order/async IDOR, cache-key
   mixing, cross-protocol object diffing).
-
-### Added
 - **Token-in-path auth for MCP clients that cannot set headers (issue #11).** The SSE endpoint is
   now also mounted at `http://host:port/<token>/`, so a client that accepts only a URL can connect
   with **no `headers` block at all**. The Server tab gained a **"Copy No-Headers Config"** button
@@ -88,35 +41,62 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   RFC 2396 `URI.resolve` drops the final segment without it (an mcp-proxy would then `401`).
   The token stays **mandatory** — it is the only control stopping any local process from driving
   Burp; the header form remains preferred where supported, since a URL-borne token is more exposed.
-### Security
-- **Unauthenticated `OPTIONS` could open an MCP SSE stream and disclose a live session id.** Two
-  long-standing defects combined: the auth interceptor short-circuited on `OPTIONS` **before** the
-  Host allowlist, the Origin lockdown *and* the token check; and Ktor's no-path `sse { }` overload
-  registers a handler with **no HTTP-method selector**, so the SSE endpoint answered every verb.
-  `OPTIONS / HTTP/1.1` with a rebound `Host:` and zero credentials therefore returned `200` plus
-  `event: endpoint / data: ?sessionId=<uuid>` (reproduced against a running instance).
+- **Configurable listening ports.** `mcp_sse_port` / `mcp_http_port` / `mcp_dashboard_port`
+  (or `-Dburpmcp.ssePort` / `.httpPort` / `.dashboardPort`), resolved on the same ladder as the bind
+  host: system property, else preference, else the 9876/9877/9878 defaults. An unparseable or
+  out-of-range value falls back instead of failing startup.
 
-  Fixed by enforcing Host + Origin on **every** method and exempting only a *genuine* CORS preflight
-  (`OPTIONS` **with** `Access-Control-Request-Method`) from the token check — a bare `OPTIONS` is now
-  an ordinary request that needs a token — and by mounting every SSE route behind an explicit
-  `method(HttpMethod.Get)` selector. Covered by 10 raw-socket regression tests
-  (`SecurityInterceptorTest`).
+  This exists because **PortSwigger's own "MCP Server" extension also defaults to 9876**: anyone
+  running both extensions had an unavoidable clash and no way out of it.
 
-  On the released 2.3.x line the leaked id was **inert** (the back-channel still demanded the token),
-  so no shipped version was exploitable; the session-id auth carrier that would have made it
-  exploitable was added and removed within this unreleased 2.4.0 line, found by an adversarial review
-  of the issue-#11 change before release. **A session id is deliberately not an authentication
-  carrier**, so no future leak of one can become a token bypass.
+### Changed
+- **Native UI redesign** — a cohesive dark + crimson brand across the Burp extension tabs: a branded
+  gradient header, structured crimson section headers, styled tables (crimson headers, clean
+  selection), themed buttons/inputs, and a consistent palette + spacing. Burp's own request/response
+  editors are left untouched so they keep matching Burp's theme. (`UiTheme`)
 
 ### Fixed
-- **`collaborator_generate_payload` crash on long/decorated custom data** — Montoya's
-  `CollaboratorClient.generatePayload(customData)` rejects any label longer than 16 chars or
-  containing non-alphanumerics with a raw `IllegalArgumentException` ("Length of custom data must
-  not exceed 16 alphanumeric characters"), which leaked to the client and spammed the extension
-  error log. The tool now **sanitizes the label to fit** (strips non-alphanumerics, truncates to 16)
-  and returns a `warning` plus the `custom_data` actually embedded, so an over-long correlation
-  label degrades gracefully instead of failing the call; an all-non-alphanumeric label returns a
-  clean actionable error. (`CollaboratorBridge.sanitizeCustomData`, **+8 tests**)
+- **`sitemap_add_issue` / `scanner_create_issue` threw a `NullPointerException` whenever
+  request/response evidence was attached** — *community contribution*: PR #13, reported, diagnosed
+  and fixed by **@aconstantinou-cmd**, verified live on Burp Suite Professional 2026.7.1. The
+  evidence `HttpRequest` was built with **no `HttpService`**, so Montoya had no host to resolve when
+  filing the issue into the site map — surfacing as `Cannot invoke "burp.Zp42.hashCode()" because
+  the return value of "burp.Zrio.ZWy()" is null`. Host/port/TLS are now derived from the issue's own
+  `url` and attached, matching the pattern already used by `addRequestToTask`.
+
+  Follow-up hardening on merge: the derivation was duplicated in both bridges with the two copies
+  disagreeing on how a malformed URL was reported, so it now lives once in `ServiceParts.fromUrl`
+  (**+11 tests**) and fails identically everywhere — an unparseable or host-less URL yields an
+  actionable message instead of a raw `URISyntaxException`.
+- **`proxy_history` could return JSON that no strict parser could read** (issue #12, reported with a
+  full diagnosis by **@th0t3p**). With `include_response=true` the raw response was string-converted
+  straight into the JSON. For a binary body — a webfont, image, archive — that yields an **unpaired
+  surrogate**, which has *no UTF-8 encoding*, so the encoded stream is corrupt and the client dies
+  with `Unterminated string`. Because one bad item breaks the array around it, **a single binary
+  asset made an entire ~4 MB, 50-item batch unparseable**.
+
+  Bodies now go through `BodyText`: a binary body is replaced by a short placeholder stating its
+  size and MIME type (flagged as `response_binary: true`), and anything emitted as text is stripped
+  of unpaired surrogates and truncated **on a safe boundary** — the old fixed-count `take()` could
+  itself split a surrogate pair and manufacture the very sequence that breaks the stream. Applied to
+  all four affected paths, not just the reported one: history **request** bodies (file uploads),
+  history **response** bodies, and both WebSocket **payload** fields. Control characters are
+  deliberately left alone — a conformant encoder escapes those correctly, and stripping them would
+  corrupt legitimate text. (**+17 tests**)
+- **A port clash was reported as the wrong problem.** When 9876 was already taken, the only message
+  said the transport "reported start() but is NOT listening… almost always a JAR built with Java
+  22+" — sending operators to rebuild their JAR when the real cause was another process (very
+  plausibly PortSwigger's MCP Server extension) holding the port. The likely story behind issue #9.
+  Startup now pre-checks the port and, on a clash, says plainly that it is **already in use**, that
+  this is **not** the Java-version problem, names the official MCP Server extension when the port is
+  its 9876 default, suggests a full Burp restart for an orphaned socket, offers `ss -ltnp | grep
+  <port>` to find the owner, and names the preference that moves the port. (**+9 tests**)
+- **HTTP/2 "kettled" requests / `RST_STREAM` PROTOCOL_ERROR (issue #7, reopened)** — a stray CR/LF in
+  an LLM-supplied `url`, method, or header value could reach the HTTP/2 `:path` (the url-only path
+  passed the raw URL straight to Montoya's `httpRequestFromUrl`) and get the request rejected by the
+  server. `http_send_request` (and its `_parallel` / `_chain` siblings) now **strip control chars
+  from the structured inputs** before building the request; `raw_request` / `http_send_raw_bytes`
+  stay verbatim so intentional CRLF (request-smuggling research) still works. (`RequestHygiene.stripControl`)
 - **`repeater_send` (and siblings) produced a "kettled" HTTP/2 request — issue #7, request-line
   variant.** A raw request with **bare-LF line endings** (what LLMs commonly emit) reached
   `HttpRequest.httpRequest(service, string)` unnormalized; Montoya could not delimit the request line,
@@ -129,16 +109,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   injection probe; `websocket_create` strips control chars from the interpolated path/headers. Raw-byte
   tools (`http_send_raw_bytes` / `raw_request`) still pass through verbatim for smuggling research.
   (`RequestHygiene.normalizeCrlf` / `adjustedOffset`, one source of truth reused by `AnalysisBridge`, **+6 tests**)
-
-## [2.3.0] — Unreleased
-
-### Fixed
-- **HTTP/2 "kettled" requests / `RST_STREAM` PROTOCOL_ERROR (issue #7, reopened)** — a stray CR/LF in
-  an LLM-supplied `url`, method, or header value could reach the HTTP/2 `:path` (the url-only path
-  passed the raw URL straight to Montoya's `httpRequestFromUrl`) and get the request rejected by the
-  server. `http_send_request` (and its `_parallel` / `_chain` siblings) now **strip control chars
-  from the structured inputs** before building the request; `raw_request` / `http_send_raw_bytes`
-  stay verbatim so intentional CRLF (request-smuggling research) still works. (`RequestHygiene.stripControl`)
+- **`collaborator_generate_payload` crash on long/decorated custom data** — Montoya's
+  `CollaboratorClient.generatePayload(customData)` rejects any label longer than 16 chars or
+  containing non-alphanumerics with a raw `IllegalArgumentException` ("Length of custom data must
+  not exceed 16 alphanumeric characters"), which leaked to the client and spammed the extension
+  error log. The tool now **sanitizes the label to fit** (strips non-alphanumerics, truncates to 16)
+  and returns a `warning` plus the `custom_data` actually embedded, so an over-long correlation
+  label degrades gracefully instead of failing the call; an all-non-alphanumeric label returns a
+  clean actionable error. (`CollaboratorBridge.sanitizeCustomData`, **+8 tests**)
 - **32 tool bugs from a full 149-tool live QA sweep** (each reproduced against `ginandjuice.shop`,
   fixed, and unit-tested — **+167 tests**). Highlights:
   - `analyze_*` now normalize **LF→CRLF** before parsing, so LF-delimited requests (what the MCP
@@ -153,11 +131,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this pro
   - Many input-validation leaks fixed (empty input, negative counts/indexes, invalid enums →
     actionable errors instead of raw JVM exceptions).
 
-### Changed
-- **Native UI redesign** — a cohesive dark + crimson brand across the Burp extension tabs: a branded
-  gradient header, structured crimson section headers, styled tables (crimson headers, clean
-  selection), themed buttons/inputs, and a consistent palette + spacing. Burp's own request/response
-  editors are left untouched so they keep matching Burp's theme. (`UiTheme`)
+### Security
+- **Unauthenticated `OPTIONS` could open an MCP SSE stream and disclose a live session id.** Two
+  long-standing defects combined: the auth interceptor short-circuited on `OPTIONS` **before** the
+  Host allowlist, the Origin lockdown *and* the token check; and Ktor's no-path `sse { }` overload
+  registers a handler with **no HTTP-method selector**, so the SSE endpoint answered every verb.
+  `OPTIONS / HTTP/1.1` with a rebound `Host:` and zero credentials therefore returned `200` plus
+  `event: endpoint / data: ?sessionId=<uuid>` (reproduced against a running instance).
+
+  Fixed by enforcing Host + Origin on **every** method and exempting only a *genuine* CORS preflight
+  (`OPTIONS` **with** `Access-Control-Request-Method`) from the token check — a bare `OPTIONS` is now
+  an ordinary request that needs a token — and by mounting every SSE route behind an explicit
+  `method(HttpMethod.Get)` selector. Covered by 10 raw-socket regression tests
+  (`SecurityInterceptorTest`).
+
+  **No released version was exploitable**: on the shipped 2.2.x line the leaked session id was inert,
+  because the back-channel still demanded the token. The session-id auth carrier that would have made
+  it exploitable was introduced and removed within this release cycle, caught by an adversarial
+  review before shipping. **A session id is deliberately not an authentication carrier**, so no
+  future leak of one can become a token bypass.
 
 ## [2.2.2] — 2026-07-06
 

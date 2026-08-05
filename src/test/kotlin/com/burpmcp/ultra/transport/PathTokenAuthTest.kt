@@ -69,9 +69,10 @@ class PathTokenAuthTest {
         assertNull(SecurityConfig.pathToken(""))
     }
 
-    @Test fun `handles a real url-safe base64 token verbatim`() {
+    @Test fun `handles a url-safe base64 token verbatim`() {
         // Tokens are Base64-URL without padding: [A-Za-z0-9_-]. None of those are path separators,
-        // so the token round-trips unescaped.
+        // so the token round-trips unescaped. The value below is SYNTHETIC — never put a real
+        // token in a test; it would be published with the repository.
         val token = "EXAMPLE_fake_token_for_tests_only_0123456789"
         assertEquals(token, SecurityConfig.pathToken("/$token/"))
         assertEquals(token, ConnectionInfoPathHelper.tokenFromUrl("http://127.0.0.1:9876/$token/"))
