@@ -149,7 +149,8 @@ class ScannerBridge(
                 taskId = taskId,
                 type = "audit",
                 taskObject = auditTask,
-                createdAt = Instant.now().toString()
+                createdAt = Instant.now().toString(),
+                injectedRuleId = authRuleId
             )
             stateManager.scanTasks[taskId] = scanTask
 
@@ -162,9 +163,10 @@ class ScannerBridge(
                 put("audit_mode", auditMode ?: "normal")
                 put("crawl_first", crawlFirst)
                 put("created_at", scanTask.createdAt)
+                put("auth_rule_active", authRuleId != null)
                 if (authRuleId != null) {
                     put("auth_rule_id", authRuleId)
-                    put("auth_note", "Traffic rule '$authRuleId' injects auth header. Use http_remove_traffic_rule to remove it when done.")
+                    put("auth_note", "Traffic rule '$authRuleId' injects the auth header for this audit. It is auto-removed when the task is deleted via scanner_task_delete.")
                 }
             }
         } catch (e: UnsupportedOperationException) {
@@ -202,6 +204,7 @@ class ScannerBridge(
             if (errCount >= 0) put("error_count", errCount)
             if (task is Audit && issueCount >= 0) put("issue_count", issueCount)
             put("created_at", scanTask.createdAt)
+            put("auth_rule_active", scanTask.injectedRuleId != null)
         }
     }
 
@@ -214,12 +217,19 @@ class ScannerBridge(
     fun listTasks(status: String?): JsonArray {
         // Pre-extract all task data outside the JSON builder to ensure
         // exceptions from unimplemented Montoya methods are caught cleanly.
-        data class TaskEntry(val id: String, val type: String, val statusMsg: String, val reqCount: Int, val createdAt: String)
+        data class TaskEntry(
+            val id: String,
+            val type: String,
+            val statusMsg: String,
+            val reqCount: Int,
+            val createdAt: String,
+            val authRuleActive: Boolean
+        )
 
         val entries = stateManager.scanTasks.values.map { scanTask ->
             val msg = safeStatusMessage(scanTask.taskObject)
             val cnt = safeRequestCount(scanTask.taskObject)
-            TaskEntry(scanTask.taskId, scanTask.type, msg, cnt, scanTask.createdAt)
+            TaskEntry(scanTask.taskId, scanTask.type, msg, cnt, scanTask.createdAt, scanTask.injectedRuleId != null)
         }
 
         return buildJsonArray {
@@ -231,6 +241,7 @@ class ScannerBridge(
                         put("status", entry.statusMsg)
                         if (entry.reqCount >= 0) put("request_count", entry.reqCount)
                         put("created_at", entry.createdAt)
+                        put("auth_rule_active", entry.authRuleActive)
                     })
                 }
         }
@@ -274,9 +285,19 @@ class ScannerBridge(
                 is Audit -> task.delete()
             }
             stateManager.scanTasks.remove(taskId)
+            // M2: remove the audit-scoped auth traffic rule so it cannot leak into
+            // the rest of the operator's traffic after the task is gone.
+            var authRuleRemoved = false
+            scanTask.injectedRuleId?.let { ruleId ->
+                authRuleRemoved = stateManager.trafficRules.removeIf { it.ruleId == ruleId }
+            }
             buildJsonObject {
                 put("task_id", taskId)
                 put("deleted", true)
+                if (scanTask.injectedRuleId != null) {
+                    put("auth_rule_removed", authRuleRemoved)
+                    put("auth_rule_id", scanTask.injectedRuleId)
+                }
             }
         } catch (e: Exception) {
             buildJsonObject {
@@ -740,7 +761,35 @@ class ScannerBridge(
                         Regex(it, RegexOption.IGNORE_CASE)
                     } ?: return AuditResult.auditResult(emptyList())
 
-                    for (payload in payloads) {
+                    // C6: cap unbounded caller lists and total wall-clock so a custom
+                    // check cannot hammer a target indefinitely (matches Burp's per-check budget spirit).
+                    val budgeted = ActiveAuditBudget.cappedPayloads(payloads)
+                    val loopStartedAt = System.currentTimeMillis()
+                    if (budgeted.size < payloads.size) {
+                        eventBus.emit("scanner.activeaudit.truncated", buildJsonObject {
+                            put("reason", "max_payloads")
+                            put("check_name", checkName)
+                            put("payloads_supplied", payloads.size)
+                            put("payloads_attempted", budgeted.size)
+                            put("cap", ActiveAuditBudget.MAX_ACTIVE_PAYLOADS_PER_INSERTION_POINT)
+                        })
+                    }
+
+                    for ((index, payload) in budgeted.withIndex()) {
+                        val elapsed = System.currentTimeMillis() - loopStartedAt
+                        val stopReason = ActiveAuditBudget.truncateReason(index, elapsed)
+                        if (stopReason != null) {
+                            if (stopReason == "time_budget") {
+                                eventBus.emit("scanner.activeaudit.truncated", buildJsonObject {
+                                    put("reason", stopReason)
+                                    put("check_name", checkName)
+                                    put("payloads_attempted", index)
+                                    put("elapsed_ms", elapsed)
+                                    put("budget_ms", ActiveAuditBudget.MAX_ELAPSED_MS)
+                                })
+                            }
+                            break
+                        }
                         try {
                             val modifiedRequest = insertionPoint.buildHttpRequestWithPayload(
                                 BurpByteArray.byteArray(payload)

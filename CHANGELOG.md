@@ -4,6 +4,18 @@ All notable changes to BurpMCP-Ultra are documented here.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/); this project uses
 [Semantic Versioning](https://semver.org/) (see `docs/ROADMAP.md` for the semver convention).
 
+## [Unreleased]
+
+### Fixed
+- **C6** — Bound the scanner active-audit payload loop (max 100 payloads per insertion point, 30s wall-clock budget) and emit `scanner.activeaudit.truncated` when truncated.
+- **C7** — Content-Length on structured HTTP requests now uses UTF-8 wire sizing (was Latin-1), eliminating CL drift on multi-byte bodies.
+- **M2** — Audit auth header traffic rules are scoped to the scan task and auto-removed on `scanner_task_delete`.
+- **S7** — Dashboard `/api/proxy/recent` error path uses `buildJsonObject` instead of string-built JSON.
+
+### Changed
+- **M4** — `http_analyze_variations` relocated to Analysis as `analyze_variations` (tool count unchanged).
+- **S8** — Documented the secondary SSE port's purpose (chained proxies) and kept it independently configurable via `burpmcp.httpPort`.
+
 ## [2.3.1] — 2026-09-16 — The agent's findings, rendered in Burp — and durable
 
 Theme: a native **Findings** tab that shows what the agent records via `findings_add`, a durable

@@ -40,8 +40,8 @@ class ExtensionBridge(
                     put("dashboard_port", 9878)
                     put("auth_required", true)
                     put("transports", buildJsonArray {
-                        add("SSE (primary)")
-                        add("SSE (secondary)")
+                        add("SSE (primary 9876)")
+                        add("SSE (secondary 9877 — for chained proxies)")
                     })
                 })
 

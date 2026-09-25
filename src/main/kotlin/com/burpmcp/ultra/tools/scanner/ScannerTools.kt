@@ -66,7 +66,7 @@ object ScannerTools {
         // ---------------------------------------------------------------
         server.addTool(
             name = "scanner_start_audit",
-            description = "Start an active audit (vulnerability scan) against target URLs or specific HTTP requests. Supports light, normal, and thorough audit modes. Pro edition only.",
+            description = "Start an active audit (vulnerability scan) against target URLs or specific HTTP requests. Supports light, normal, and thorough audit modes. When auth_header_name/value are set, a traffic rule injects that header for the audit and is auto-removed when the task is deleted via scanner_task_delete. Pro edition only.",
             inputSchema = ToolSchema(
                 properties = buildJsonObject {
                     putJsonObject("urls") { put("type", "array"); putJsonObject("items") { put("type", "string") }; put("description", "Target URLs to audit") }

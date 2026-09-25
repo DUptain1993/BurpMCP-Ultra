@@ -47,6 +47,8 @@ class HttpBridge(
     private val eventBus: EventBus,
     private val stateManager: StateManager
 ) {
+    // C7: Content-Length / body sizing uses HttpWireEncoding.WIRE_CHARSET (UTF-8).
+    // sendRawBytes stays ISO-8859-1 (byte-exact by design).
 
     /**
      * Adds an HttpRequestResponse to Burp's sitemap and annotates it as MCP-originated.
@@ -1011,6 +1013,7 @@ class HttpBridge(
     /**
      * Constructs a complete raw HTTP/1.1 request from structured parameters.
      * Exactly preserves caller headers; auto-adds Host and Content-Length only if missing.
+     * Content-Length uses [HttpWireEncoding.WIRE_CHARSET] (UTF-8) to match Burp's wire encoding (C7).
      */
     private fun constructRawHttpRequest(
         url: String,
@@ -1020,60 +1023,17 @@ class HttpBridge(
         host: String,
         port: Int,
         tls: Boolean
-    ): String {
-        val uri = try { URI(url) } catch (_: Exception) { null }
-        val pathPart = uri?.rawPath?.ifEmpty { "/" } ?: "/"
-        val queryPart = uri?.rawQuery?.let { "?$it" } ?: ""
-        val requestTarget = "$pathPart$queryPart"
-
-        val isDefaultPort = (tls && port == 443) || (!tls && port == 80)
-        val hostHeader = if (isDefaultPort) host else "$host:$port"
-
-        val sb = StringBuilder()
-        sb.append("$method $requestTarget HTTP/1.1\r\n")
-
-        val hasHost = headers.keys.any { it.equals("Host", ignoreCase = true) }
-        if (!hasHost) sb.append("Host: $hostHeader\r\n")
-
-        headers.forEach { (k, v) -> sb.append("$k: $v\r\n") }
-
-        val hasContentLength = headers.keys.any { it.equals("Content-Length", ignoreCase = true) }
-        val hasTransferEncoding = headers.keys.any { it.equals("Transfer-Encoding", ignoreCase = true) }
-        if (body != null && !hasContentLength && !hasTransferEncoding) {
-            val bodyBytes = body.toByteArray(Charsets.ISO_8859_1)
-            sb.append("Content-Length: ${bodyBytes.size}\r\n")
-        }
-
-        sb.append("\r\n")
-        if (body != null) sb.append(body)
-
-        return sb.toString()
-    }
+    ): String = HttpWireEncoding.constructRawHttpRequest(url, method, headers, body, host, port, tls)
 
     /**
      * Recomputes the Content-Length header on a raw HTTP request to match the actual
-     * body size in bytes (ISO-8859-1). Returns the original request unchanged if there
+     * body size in [HttpWireEncoding.WIRE_CHARSET] bytes. Returns the original request unchanged if there
      * is no body section or no Content-Length header.
      *
      * Fixes the silent status_code:0 ghost response when caller-computed CL is wrong.
      */
-    private fun fixContentLength(rawRequest: String): String {
-        val boundary = rawRequest.indexOf("\r\n\r\n")
-        if (boundary < 0) return rawRequest
-
-        val headerSection = rawRequest.substring(0, boundary)
-        val bodySection = rawRequest.substring(boundary + 4)
-
-        val clRegex = Regex("(?im)^Content-Length:\\s*(\\d+)\\s*$")
-        val clMatch = clRegex.find(headerSection) ?: return rawRequest
-
-        val declaredLength = clMatch.groupValues[1].toIntOrNull() ?: return rawRequest
-        val actualLength = bodySection.toByteArray(Charsets.ISO_8859_1).size
-        if (declaredLength == actualLength) return rawRequest
-
-        val fixedHeader = clRegex.replaceFirst(headerSection, "Content-Length: $actualLength")
-        return "$fixedHeader\r\n\r\n$bodySection"
-    }
+    private fun fixContentLength(rawRequest: String): String =
+        HttpWireEncoding.fixContentLength(rawRequest)
 
     // ---------------------------------------------------------------
     // Timeout-bounded execution
