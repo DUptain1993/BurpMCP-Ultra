@@ -154,7 +154,7 @@ class BurpMcpUltraTab(
     private val httpToolNames = setOf(
         "http_send_request", "http_send_requests_parallel", "http_send_request_chain",
         "http_fuzz", "http_send_raw_bytes", "http_race", "http_cookie_jar_get",
-        "http_cookie_jar_set", "http_analyze_keywords", "http_analyze_variations",
+        "http_cookie_jar_set", "http_analyze_keywords",
         "http_set_traffic_rule", "http_list_traffic_rules", "http_remove_traffic_rule",
         "auth_diff", "api_import_openapi"
     )

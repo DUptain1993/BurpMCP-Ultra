@@ -367,52 +367,7 @@ Returns array of results in original order, plus group_timings_ms and groups_dis
         }
 
         // ---------------------------------------------------------------
-        // 7. http_analyze_variations
-        // ---------------------------------------------------------------
-        server.addTool(
-            name = "http_analyze_variations",
-            description = "Analyze variations across multiple HTTP responses. Identifies which response attributes (status code, content length, headers, body content, etc.) vary and which are invariant. Useful for identifying valid vs. invalid responses in fuzzing/scanning.",
-            inputSchema = ToolSchema(
-                properties = buildJsonObject {
-                    putJsonObject("responses") { put("type", "array"); putJsonObject("items") { put("type", "string") }; put("description", "Array of raw HTTP response strings (at least 2)") }
-                },
-                required = listOf("responses")
-            )
-        ) { request ->
-            try {
-                val args = request.params.arguments ?: emptyMap()
-
-                val responses = args["responses"].asStringList()
-                    ?: return@addTool CallToolResult(
-                        content = listOf(TextContent(buildJsonObject {
-                            put("error", "Parameter 'responses' is required (array of raw HTTP response strings)")
-                        }.toString())),
-                        isError = true
-                    )
-
-                if (responses.size < 2) {
-                    return@addTool CallToolResult(
-                        content = listOf(TextContent(buildJsonObject {
-                            put("error", "At least 2 responses are required for variation analysis")
-                        }.toString())),
-                        isError = true
-                    )
-                }
-
-                val result = bridge.analyzeVariations(responses)
-                CallToolResult(content = listOf(TextContent(result.toString())))
-            } catch (e: Exception) {
-                CallToolResult(
-                    content = listOf(TextContent(buildJsonObject {
-                        put("error", e.message ?: "Unknown error")
-                    }.toString())),
-                    isError = true
-                )
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // 8. http_set_traffic_rule
+        // 7. http_set_traffic_rule  (analyze_variations moved to AnalysisTools as analyze_variations — M4)
         // ---------------------------------------------------------------
         server.addTool(
             name = "http_set_traffic_rule",

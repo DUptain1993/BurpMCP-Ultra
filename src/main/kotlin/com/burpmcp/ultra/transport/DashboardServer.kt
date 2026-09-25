@@ -126,7 +126,12 @@ class DashboardServer(
                                     val history = bridges.proxy.getHistory(0, limit, null, null, null, null, false, true, true, null)
                                     call.respondText(history.toString(), ContentType.Application.Json)
                                 } catch (e: Exception) {
-                                    call.respondText("""{"error":"${e.message?.replace("\"", "'")}"}""", ContentType.Application.Json)
+                                    call.respondText(
+                                        buildJsonObject {
+                                            put("error", e.message ?: "Unknown error")
+                                        }.toString(),
+                                        ContentType.Application.Json
+                                    )
                                 }
                             }
 

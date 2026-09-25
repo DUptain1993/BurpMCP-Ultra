@@ -31,8 +31,13 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Two SSE transports are exposed on separate ports so that multiple
  * MCP clients can connect independently:
- * - **Primary SSE** on [ssePort] (default 9876).
- * - **Secondary SSE** on [httpPort] (default 9877).
+ * - **Primary SSE** on [ssePort] (default 9876) — for the operator's own MCP client.
+ * - **Secondary SSE** on [httpPort] (default 9877) — for chained tools (e.g. supergateway,
+ *   mcp-proxy) that need a separate endpoint without disturbing the primary session.
+ *
+ * Both ports are independently configurable (`burpmcp.ssePort` / `burpmcp.httpPort` system
+ * properties, or the matching Burp preferences). Do not remove the secondary port without
+ * a major-version bump; clients may already depend on it (roadmap S8: justified, not dropped).
  *
  * Both are plain MCP SSE transports: the SSE stream is the ROOT path "/" (GET) and
  * the back-channel is "/?sessionId=..." (POST) — NOT "/sse". There is no "Streamable

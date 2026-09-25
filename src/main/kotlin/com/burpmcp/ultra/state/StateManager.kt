@@ -170,7 +170,9 @@ data class ScanTask(
     val taskId: String,
     val type: String,
     val taskObject: Any,
-    val createdAt: String
+    val createdAt: String,
+    /** Traffic-rule id injected for audit auth (M2); removed when the task is deleted. */
+    val injectedRuleId: String? = null
 )
 
 /**
